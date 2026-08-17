@@ -503,3 +503,8 @@ header .subtitle { color: var(--dim); font-size: 12px; display: block; }
   border-radius: 3px;
   font-size: 10px;
 }
+.usage-stats {
+  font-family: var(--mono);
+  color: var(--dim);
+}
+.usage-stats strong { color: var(--accent); }

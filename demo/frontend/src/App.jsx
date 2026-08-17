@@ -7,6 +7,7 @@ const API = "http://localhost:8000/chat";
 const RESET = "http://localhost:8000/reset";
 const PORTFOLIO = "http://localhost:8000/portfolio";
 const ALERTS = "http://localhost:8000/alerts";
+const USAGE = "http://localhost:8000/usage";
 
 function Markdown({ text, streaming = false }) {
   return (
@@ -63,6 +64,19 @@ export default function App() {
     };
     loadAlerts();
     const timer = setInterval(loadAlerts, 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Load LLM usage stats + poll every 30s
+  const [usage, setUsage] = useState(null);
+  useEffect(() => {
+    const loadUsage = () => {
+      fetch(USAGE).then(r => r.json()).then(d => {
+        if (d.total_tokens != null) setUsage(d);
+      }).catch(() => { /* backend not running yet */ });
+    };
+    loadUsage();
+    const timer = setInterval(loadUsage, 30000);
     return () => clearInterval(timer);
   }, []);
 
@@ -362,6 +376,19 @@ export default function App() {
 
       <div className="footer">
         kitegen · 3-agent pipeline · session: <code>{threadId}</code>
+        {usage && (
+          <>
+            {" · "}
+            <span className="usage-stats">
+              tokens <strong>{usage.total_tokens?.toLocaleString()}</strong>
+              {" · "}cost <strong>${usage.total_cost?.toFixed(4)}</strong>
+              {" · "}calls <strong>{usage.calls}</strong>
+              {usage.by_model && Object.keys(usage.by_model).length > 0 && (
+                <>{" · "}{Object.entries(usage.by_model).map(([m, s]) => `${m}: ${s.tokens.toLocaleString()}`).join(", ")}</>
+              )}
+            </span>
+          </>
+        )}
       </div>
     </div>
   );

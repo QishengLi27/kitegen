@@ -183,6 +183,33 @@ def test_trading_time_session_boundaries():
     assert in_session is False
 
 
+def test_is_symbol_tradable_per_market():
+    """Per-symbol sessions: A-share can't trade during US hours, etc."""
+    from datetime import datetime
+
+    from demo.paper import is_symbol_tradable
+
+    # 22:00 Beijing — US open, A-share/HK closed
+    ok, _ = is_symbol_tradable("AAPL", datetime(2026, 8, 17, 22, 0))
+    assert ok is True
+    ok, why = is_symbol_tradable("000725.SZ", datetime(2026, 8, 17, 22, 0))
+    assert ok is False and "CN market closed" in why
+    ok, why = is_symbol_tradable("0700.HK", datetime(2026, 8, 17, 22, 0))
+    assert ok is False and "HK market closed" in why
+
+    # 10:00 — A-share + HK open, US closed
+    ok, _ = is_symbol_tradable("600519.SS", datetime(2026, 8, 17, 10, 0))
+    assert ok is True
+    ok, why = is_symbol_tradable("AAPL", datetime(2026, 8, 17, 10, 0))
+    assert ok is False and "US market closed" in why
+
+    # 15:30 — HK afternoon open, A-share closed
+    ok, _ = is_symbol_tradable("0700.HK", datetime(2026, 8, 17, 15, 30))
+    assert ok is True
+    ok, _ = is_symbol_tradable("000725.SZ", datetime(2026, 8, 17, 15, 30))
+    assert ok is False
+
+
 def test_rebuild_trader_memory_from_trades(tmp_path, monkeypatch):
     """Restart simulation: memory is rebuilt from the persisted trade ledger."""
     monkeypatch.setattr("demo.paper.DATA_DIR", tmp_path)

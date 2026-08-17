@@ -20,12 +20,14 @@ from datetime import date
 from typing import Any
 
 import kitegen as kg
-from demo.agents import _get_llm
+from demo.agents import _get_llm, market_researcher
+from demo.cache import cache_research, get_cached_research
 from demo.monitor import _fetch_all
 from demo.paper import (
     PaperAccount,
     PaperConfig,
     get_universe,
+    is_symbol_tradable,
     is_trading_time,
     load_config,
 )
@@ -97,6 +99,54 @@ paper_trader = kg.Agent(
 )
 
 
+# ── Research reports ─────────────────────────────────────────────────────────
+
+# Research text is long — the decision prompt carries a digest per symbol
+RESEARCH_DIGEST_CHARS = 500
+
+
+async def _ensure_research(prices: dict[str, float]) -> dict[str, str]:
+    """Return a research digest per symbol.
+
+    Cached reports within TTL are reused (shared cache with the chat
+    assistant). On miss or stale, market_researcher generates a fresh
+    report which is stored back into the cache.
+    """
+    digests: dict[str, str] = {}
+    for symbol in prices:
+        cached = get_cached_research(symbol)
+        if cached:
+            report = cached["report"]
+            logger.info("[paper] research cache hit for %s (%s)", symbol, cached["generated_at"])
+        else:
+            try:
+                result = await market_researcher.execute({
+                    "input": (
+                        f"Analyze {symbol} for a trading decision. Cover: "
+                        f"trend regime (bull/bear/range), key support/resistance "
+                        f"levels, and the main risks. Be concise — 250 words max."
+                    ),
+                })
+                report = result.get("output", "")
+                if report:
+                    try:
+                        cache_research(symbol, report)
+                    except OSError:
+                        pass  # cache is best-effort
+                else:
+                    report = "(research unavailable)"
+                logger.info("[paper] generated research for %s (%d chars)", symbol, len(report))
+            except Exception as e:
+                logger.warning("[paper] research failed for %s: %s", symbol, e)
+                report = "(research unavailable)"
+
+        digests[symbol] = (
+            report[:RESEARCH_DIGEST_CHARS]
+            + ("…" if len(report) > RESEARCH_DIGEST_CHARS else "")
+        )
+    return digests
+
+
 # ── Tick ─────────────────────────────────────────────────────────────────────
 
 _tick_lock = asyncio.Lock()
@@ -137,15 +187,20 @@ async def _paper_tick_locked(force: bool = False) -> dict:
         if symbol not in prices:
             continue
         result = await compute_signal.invoke({"symbol": symbol}, kg.Context())
-        # compute_signal returns a text block; keep the first two lines (signal + confidence)
-        lines = result.strip().splitlines()
-        signals[symbol] = "\n".join(lines[:2])
+        # Full signal text — indicators, ATR key levels, and the vote summary
+        # all inform the decision
+        signals[symbol] = result.strip()
 
     if not prices:
         logger.warning("[paper] no quotes available, skipping tick")
         return {"status": "no_data"}
 
-    # 2. Account state for the prompt
+    # 2. Research reports: cached within TTL; generate via market_researcher
+    #    on miss/stale and store in the shared research cache (also used by
+    #    the chat assistant — one report serves both).
+    reports = await _ensure_research(prices)
+
+    # 3. Account state for the prompt
     positions_text = "\n".join(
         f"- {s}: {p.shares} shares @ {p.cost_basis} (bought {p.buy_date})"
         for s, p in account.positions.items()
@@ -157,8 +212,11 @@ async def _paper_tick_locked(force: bool = False) -> dict:
         f"- Cash: {account.cash:.2f}\n"
         f"- Equity: {equity:.2f}\n"
         f"- Positions:\n{positions_text}\n\n"
-        f"Signals for this tick:\n"
-        + "\n\n".join(f"{s}:\n{sig}" for s, sig in signals.items())
+        f"Signals and research for this tick:\n"
+        + "\n\n".join(
+            f"{s}:\n{signals[s]}\nResearch: {reports[s]}"
+            for s in signals
+        )
         + "\n\nOutput your decisions as strict JSON."
     )
 
@@ -199,6 +257,13 @@ async def _paper_tick_locked(force: bool = False) -> dict:
             blocked.append({"symbol": symbol, "reason": f"invalid price {price}"})
             continue
 
+        # Per-market trading hours: an A-share can't trade during US hours
+        # even though the global tick gate saw "some market open"
+        tradable, why_not = is_symbol_tradable(symbol)
+        if not tradable:
+            blocked.append({"symbol": symbol, "reason": why_not})
+            continue
+
         try:
             if action == "buy":
                 # Position cap: value after buy <= max_position_pct * equity
@@ -236,11 +301,19 @@ async def _paper_tick_locked(force: bool = False) -> dict:
         except ValueError as e:
             blocked.append({"symbol": symbol, "reason": str(e)})
 
-    # 5. Forced stop-loss (independent of the agent)
+    # 5. Forced stop-loss (independent of the agent). A stop can only
+    # execute when the symbol's own market is open — a 2 AM forced sell
+    # of an A-share is not possible in reality, so it's blocked and
+    # remains armed for the next session.
     for symbol, pos in list(account.positions.items()):
         price = prices.get(symbol)
         if price is None:
             continue
+
+        tradable, why_not = is_symbol_tradable(symbol)
+        if not tradable:
+            continue  # market closed — the stop stays armed
+
         if price <= pos.cost_basis * (1 - config.stop_loss_pct):
             try:
                 trade = account.sell(

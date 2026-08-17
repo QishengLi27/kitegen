@@ -9,9 +9,20 @@ from demo.paper import PaperAccount, PaperPosition
 
 @pytest.fixture
 def isolated(tmp_path, monkeypatch):
-    """Isolate paper data dir + patch signal/LLM dependencies."""
+    """Isolate paper data dir + patch signal/LLM/research dependencies."""
     monkeypatch.setattr("demo.paper.DATA_DIR", tmp_path)
     monkeypatch.setattr("demo.paper_engine.compute_signal", _FakeSignal())
+    # Deterministic market-hours: everything tradable (tests run at any hour)
+    monkeypatch.setattr(
+        "demo.paper_engine.is_symbol_tradable",
+        lambda symbol, now=None: (True, ""),
+    )
+    # Research always cache-hits — tests never touch the LLM or real cache files
+    monkeypatch.setattr(
+        "demo.paper_engine.get_cached_research",
+        lambda symbol: {"report": "cached research report", "generated_at": "2026-08-17T10:00:00"},
+    )
+    monkeypatch.setattr("demo.paper_engine.cache_research", lambda symbol, report: None)
     # Explicit universe — otherwise get_universe falls back to the real
     # portfolio on disk, which tests must never depend on
     from demo.paper import PaperConfig, save_config
@@ -94,6 +105,71 @@ def test_zero_price_decision_is_blocked(isolated, monkeypatch):
     assert summary["status"] == "ok"
     assert summary["executed"] == []
     assert any("invalid price" in b["reason"] for b in summary["blocked"])
+
+
+def test_research_cache_miss_generates_and_caches(isolated, monkeypatch):
+    """Cache miss → market_researcher runs → report cached + fed to the agent."""
+    acct = PaperAccount()
+    acct.cash = 100_000
+    acct.save()
+
+    from demo.paper_engine import TradeDecisions
+    _set_decisions(monkeypatch, TradeDecisions(decisions=[]))
+    _set_prices(monkeypatch, {"TEST": {"price": 10.0, "chg": 0.0}})
+
+    cached_reports = []
+    generated_inputs = []
+
+    monkeypatch.setattr("demo.paper_engine.get_cached_research", lambda symbol: None)
+
+    class _FakeResearcher:
+        async def execute(self, state):
+            generated_inputs.append(state["input"])
+            return {"output": "fresh research: bullish regime, support 9.5"}
+
+    monkeypatch.setattr("demo.paper_engine.market_researcher", _FakeResearcher())
+    monkeypatch.setattr(
+        "demo.paper_engine.cache_research",
+        lambda symbol, report: cached_reports.append((symbol, report)),
+    )
+
+    from demo.paper_engine import paper_tick
+    summary = asyncio.run(paper_tick(force=True))
+
+    assert summary["status"] == "ok"
+    assert len(generated_inputs) == 1           # researcher ran
+    assert "TEST" in generated_inputs[0]        # asked about the right symbol
+    assert cached_reports == [("TEST", "fresh research: bullish regime, support 9.5")]
+
+
+def test_market_closed_blocks_decision(isolated, monkeypatch):
+    """A symbol whose market is closed gets blocked, not traded."""
+    acct = PaperAccount()
+    acct.cash = 100_000
+    acct.save()
+
+    from demo.paper import PaperConfig, save_config
+    save_config(PaperConfig(enabled_symbols=["000725.SZ"]))
+
+    from demo.paper_engine import TradeDecision, TradeDecisions
+    _set_decisions(monkeypatch, TradeDecisions(decisions=[
+        TradeDecision(symbol="000725.SZ", action="buy", shares=100, reason="test"),
+    ]))
+    _set_prices(monkeypatch, {"000725.SZ": {"price": 6.08, "chg": 0.0}})
+    monkeypatch.setattr(
+        "demo.paper_engine.is_symbol_tradable",
+        lambda symbol, now=None: (False, "CN market closed (22:00)"),
+    )
+
+    from demo.paper_engine import paper_tick
+    summary = asyncio.run(paper_tick(force=True))
+
+    assert summary["executed"] == []
+    assert any("CN market closed" in b["reason"] for b in summary["blocked"])
+
+    # Position must NOT exist
+    acct2 = PaperAccount.load()
+    assert "000725.SZ" not in acct2.positions
 
 
 def test_tick_lock_serializes_concurrent_ticks(isolated, monkeypatch):

@@ -39,10 +39,17 @@ class PaperConfig:
     trading_hours_only: bool = True     # skip ticks outside trading hours
 
 
-# Trading sessions in LOCAL time (assumes Beijing time — A-share + HK + US):
-#   09:30-12:00  A-share + HK morning
-#   13:00-16:00  A-share + HK afternoon
-#   21:30-04:00  US market (EDT, overnight across midnight)
+# Trading sessions in LOCAL time (assumes Beijing time):
+#   A-share: 09:30-11:30, 13:00-15:00 (weekdays)
+#   HK:      09:30-12:00, 13:00-16:00 (weekdays)
+#   US:      21:30-04:00 (EDT, overnight across midnight, weekdays)
+MARKET_SESSIONS = {
+    "CN": [("09:30", "11:30"), ("13:00", "15:00")],
+    "HK": [("09:30", "12:00"), ("13:00", "16:00")],
+    "US": [("21:30", "23:59"), ("00:00", "04:00")],
+}
+
+# Global check: ANY session open (used to skip the whole tick cheaply)
 TRADING_SESSIONS = [
     ("09:30", "12:00"),
     ("13:00", "16:00"),
@@ -51,10 +58,20 @@ TRADING_SESSIONS = [
 ]
 
 
+def _market_of(symbol: str) -> str:
+    """Classify a symbol into its trading market."""
+    if symbol.endswith(".SS") or symbol.endswith(".SZ"):
+        return "CN"
+    if symbol.endswith(".HK"):
+        return "HK"
+    return "US"
+
+
 def is_trading_time(now: datetime | None = None) -> tuple[bool, str]:
-    """Check whether it is currently a trading session on a weekday.
+    """Check whether ANY market is in session on a weekday.
 
     Returns (in_session, reason_if_not). Weekends are never trading days.
+    This is the coarse gate; use is_symbol_tradable() for per-symbol checks.
     """
     now = now or datetime.now()
     if now.weekday() >= 5:  # Saturday / Sunday
@@ -64,6 +81,23 @@ def is_trading_time(now: datetime | None = None) -> tuple[bool, str]:
         if start <= hm <= end:
             return True, ""
     return False, f"outside trading hours ({hm})"
+
+
+def is_symbol_tradable(symbol: str, now: datetime | None = None) -> tuple[bool, str]:
+    """Check whether THIS symbol's market is in session.
+
+    An A-share (.SS/.SZ) is only tradable during CN hours, HK during HK
+    hours, and US symbols during US hours — even if another market is open.
+    """
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False, "weekend"
+    hm = now.strftime("%H:%M")
+    market = _market_of(symbol)
+    for start, end in MARKET_SESSIONS[market]:
+        if start <= hm <= end:
+            return True, ""
+    return False, f"{market} market closed ({hm})"
 
 
 # ── Models ───────────────────────────────────────────────────────────────────

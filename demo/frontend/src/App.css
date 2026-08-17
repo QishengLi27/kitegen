@@ -100,6 +100,11 @@ header .subtitle { color: var(--dim); font-size: 12px; display: block; }
   font-size: 10px;
   color: var(--dim);
 }
+.paper-config label em {
+  font-style: normal;
+  opacity: .6;
+  font-size: 9px;
+}
 .paper-config label input {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -137,6 +142,61 @@ header .subtitle { color: var(--dim); font-size: 12px; display: block; }
   padding: 0;
 }
 .run-anyway:hover { color: var(--text); }
+.config-msg {
+  font-size: 11px;
+  align-self: center;
+}
+.config-msg.ok { color: var(--green); }
+.config-msg.err { color: var(--red); }
+
+/* Confirmation dialog */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.dialog {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: 360px;
+  max-width: 90vw;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .4);
+}
+.dialog-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+.dialog-message {
+  font-size: 13px;
+  color: var(--dim);
+  line-height: 1.6;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.dialog-danger {
+  background: var(--red);
+  color: #fff;
+  border: none;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.dialog-danger:hover { opacity: .9; }
 
 /* Monitor alerts panel */
 .alerts-panel {

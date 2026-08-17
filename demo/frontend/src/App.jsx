@@ -51,6 +51,8 @@ export default function App() {
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
+  const readerRef = useRef(null);
+  const stoppedRef = useRef(false);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); },
     [messages, stages, adviceText]);
@@ -112,12 +114,22 @@ export default function App() {
     setPosFormBusy(false);
   };
 
-  const deletePosition = async (symbol) => {
-    if (!window.confirm(`Remove ${symbol} from your portfolio?`)) return;
-    try {
-      await fetch(`${PORTFOLIO}/positions/${symbol}`, { method: "DELETE" });
-      refreshPortfolio();
-    } catch { /* ignore */ }
+  // Custom confirmation dialog (replaces window.confirm)
+  const [confirmDialog, setConfirmDialog] = useState(null);
+
+  const deletePosition = (symbol) => {
+    setConfirmDialog({
+      title: "Remove Position",
+      message: `Remove ${symbol} from your portfolio? This only affects the tracking list.`,
+      confirmLabel: "Remove",
+      onConfirm: async () => {
+        try {
+          await fetch(`${PORTFOLIO}/positions/${symbol}`, { method: "DELETE" });
+          refreshPortfolio();
+        } catch { /* ignore */ }
+        setConfirmDialog(null);
+      },
+    });
   };
 
   // Load monitor alerts + poll every 30s
@@ -138,11 +150,40 @@ export default function App() {
   const [paperConfig, setPaperConfig] = useState(null); // form draft
   const [paperBusy, setPaperBusy] = useState(false);
   const [paperResult, setPaperResult] = useState(null); // last tick summary
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configMsg, setConfigMsg] = useState(null); // "✓ Saved" / error
+  const knownTradeIds = useRef(new Set());  // for trade-change notifications
+
+  const notifyTrade = (t) => {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    try {
+      new Notification("📊 Paper Trader", {
+        body: `${t.action.toUpperCase()} ${t.symbol} ${t.shares} shares @ $${t.price}`,
+      });
+    } catch { /* notifications may be blocked */ }
+  };
 
   const refreshPaper = useCallback(() => {
     fetch(PAPER).then(r => r.json()).then(d => {
+      // Trade-change browser notifications: first poll seeds the set,
+      // subsequent new trade ids fire a notification
+      if (d.trades) {
+        if (knownTradeIds.current.size > 0) {
+          d.trades
+            .filter(t => !knownTradeIds.current.has(t.id))
+            .forEach(notifyTrade);
+        }
+        d.trades.forEach(t => knownTradeIds.current.add(t.id));
+      }
       setPaper(d);
-      if (d.config && !paperConfig) setPaperConfig(d.config);
+      if (d.config && !paperConfig) {
+        // Backend stores fractions (0.2); the UI works in percent (20)
+        setPaperConfig({
+          ...d.config,
+          max_position_pct: Math.round(d.config.max_position_pct * 10000) / 100,
+          stop_loss_pct: Math.round(d.config.stop_loss_pct * 10000) / 100,
+        });
+      }
     }).catch(() => { /* backend not running yet */ });
   }, [paperConfig]);
 
@@ -153,6 +194,11 @@ export default function App() {
   }, [refreshPaper]);
 
   const runPaperTick = async () => {
+    // Ask for notification permission on first user interaction with
+    // the paper trader (browsers require a user gesture)
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
     setPaperBusy(true);
     setPaperResult(null);
     try {
@@ -164,19 +210,41 @@ export default function App() {
     setPaperBusy(false);
   };
 
-  const resetPaper = async () => {
-    if (!window.confirm("Reset the paper account to initial capital?")) return;
-    await fetch(`${PAPER}/reset`, { method: "POST" }).catch(() => {});
-    refreshPaper();
+  const resetPaper = () => {
+    setConfirmDialog({
+      title: "Reset Paper Account",
+      message: `Reset the paper account to the initial capital ($${paperConfig?.initial_capital?.toLocaleString() || "—"})? All positions and trade history will be cleared.`,
+      confirmLabel: "Reset",
+      onConfirm: async () => {
+        await fetch(`${PAPER}/reset`, { method: "POST" }).catch(() => {});
+        refreshPaper();
+        setConfirmDialog(null);
+      },
+    });
   };
 
   const savePaperConfig = async () => {
-    await fetch(`${PAPER}/config`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(paperConfig),
-    }).catch(() => {});
-    refreshPaper();
+    setConfigSaving(true);
+    setConfigMsg(null);
+    try {
+      const r = await fetch(`${PAPER}/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // UI works in percent (20 = 20%); backend stores fractions (0.2)
+        body: JSON.stringify({
+          ...paperConfig,
+          max_position_pct: paperConfig.max_position_pct / 100,
+          stop_loss_pct: paperConfig.stop_loss_pct / 100,
+        }),
+      });
+      const d = await r.json();
+      setConfigMsg(d.status === "ok" ? "✓ Saved" : `✗ ${d.message || "Failed"}`);
+      refreshPaper();
+    } catch {
+      setConfigMsg("✗ Connection failed");
+    }
+    setConfigSaving(false);
+    setTimeout(() => setConfigMsg(null), 4000);
   };
   // Load LLM usage stats + poll every 30s
   const [usage, setUsage] = useState(null);
@@ -215,6 +283,7 @@ export default function App() {
     setLoading(true);
     setStages([]);
     setAdviceText("");
+    stoppedRef.current = false;
 
     // Declared outside try so the abort path can save partial results
     let finalStages = [];
@@ -233,6 +302,7 @@ export default function App() {
       });
 
       const reader = resp.body.getReader();
+      readerRef.current = reader;
       const decoder = new TextDecoder();
       let buffer = "";
 
@@ -270,8 +340,20 @@ export default function App() {
         }
       }
 
-      // Push the completed assistant message
-      if (errorMsg) {
+      // Push the completed assistant message. If the user pressed stop,
+      // reader.cancel() made the loop end "normally" — mark it stopped.
+      if (stoppedRef.current) {
+        if (finalStages.length || finalAdvice) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            stages: finalStages,
+            content: finalAdvice,
+            stopped: true,
+          }]);
+        } else {
+          setMessages((prev) => [...prev, { role: "system", content: "⏹ Generation stopped" }]);
+        }
+      } else if (errorMsg) {
         setMessages((prev) => [...prev, { role: "system", content: "❌ " + errorMsg }]);
       } else if (finalAdvice || finalStages.length) {
         setMessages((prev) => [...prev, {
@@ -281,7 +363,7 @@ export default function App() {
         }]);
       }
     } catch (e) {
-      if (e.name === "AbortError") {
+      if (e.name === "AbortError" || stoppedRef.current) {
         // User pressed stop — keep whatever was generated so far
         if (finalStages.length || finalAdvice) {
           setMessages((prev) => [...prev, {
@@ -304,6 +386,7 @@ export default function App() {
       setStages([]);
       setAdviceText("");
       abortRef.current = null;
+      readerRef.current = null;
     }
   }, [input, loading, threadId]);
 
@@ -314,7 +397,18 @@ export default function App() {
   const stop = () => {
     // Abort the in-flight request. The backend cancels the pipeline;
     // partial results are preserved in the message list.
+    // Both abort() AND reader.cancel() — Safari doesn't reliably reject
+    // reader.read() on abort alone, which would leave loading stuck.
+    stoppedRef.current = true;
     abortRef.current?.abort();
+    readerRef.current?.cancel().catch(() => {});
+
+    // Safety net: force-reset the UI even if the stream never rejects
+    setTimeout(() => {
+      setLoading(false);
+      setStages([]);
+      setAdviceText("");
+    }, 2000);
   };
 
   const reset = async () => {
@@ -577,11 +671,11 @@ export default function App() {
                     <input type="number" value={paperConfig.check_interval_min}
                       onChange={e => setPaperConfig({ ...paperConfig, check_interval_min: parseInt(e.target.value) })} />
                   </label>
-                  <label>Max position %
+                  <label>Max position % <em>(20 = 20%)</em>
                     <input type="number" step="0.01" value={paperConfig.max_position_pct}
                       onChange={e => setPaperConfig({ ...paperConfig, max_position_pct: parseFloat(e.target.value) })} />
                   </label>
-                  <label>Stop loss %
+                  <label>Stop loss % <em>(8 = 8%)</em>
                     <input type="number" step="0.01" value={paperConfig.stop_loss_pct}
                       onChange={e => setPaperConfig({ ...paperConfig, stop_loss_pct: parseFloat(e.target.value) })} />
                   </label>
@@ -611,7 +705,14 @@ export default function App() {
                   </label>
                 </div>
                 <div className="paper-actions">
-                  <button className="form-save" onClick={savePaperConfig}>Save Config</button>
+                  <button className="form-save" onClick={savePaperConfig} disabled={configSaving}>
+                    {configSaving ? "Saving..." : "Save Config"}
+                  </button>
+                  {configMsg && (
+                    <span className={`config-msg ${configMsg.startsWith("✓") ? "ok" : "err"}`}>
+                      {configMsg}
+                    </span>
+                  )}
                   <button className="briefing-btn" onClick={runPaperTick} disabled={paperBusy}>
                     {paperBusy ? "Running..." : "▶ Run Tick"}
                   </button>
@@ -737,6 +838,16 @@ export default function App() {
         )}
       </div>
 
+      {/* Confirmation dialog */}
+      <ConfirmDialog
+        open={confirmDialog}
+        title={confirmDialog?.title || ""}
+        message={confirmDialog?.message || ""}
+        confirmLabel={confirmDialog?.confirmLabel || "Confirm"}
+        onConfirm={confirmDialog?.onConfirm}
+        onCancel={() => setConfirmDialog(null)}
+      />
+
       <div className="footer">
         kitegen · 3-agent pipeline · session: <code>{threadId}</code>
         {usage && (
@@ -752,6 +863,24 @@ export default function App() {
             </span>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Confirmation dialog ───────────────────────────────────────────────────── */
+
+function ConfirmDialog({ open, title, message, confirmLabel, onConfirm, onCancel }) {
+  if (!open) return null;
+  return (
+    <div className="dialog-overlay" onClick={onCancel}>
+      <div className="dialog" onClick={e => e.stopPropagation()}>
+        <div className="dialog-title">{title}</div>
+        <div className="dialog-message">{message}</div>
+        <div className="dialog-actions">
+          <button className="form-cancel" onClick={onCancel}>Cancel</button>
+          <button className="dialog-danger" onClick={onConfirm}>{confirmLabel}</button>
+        </div>
       </div>
     </div>
   );

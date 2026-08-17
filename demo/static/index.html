@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stock Analysis — kitegen</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d2991d;
+    --radius: 8px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    display: flex; justify-content: center;
+    min-height: 100vh; padding: 24px;
+  }
+  .app {
+    width: 100%; max-width: 720px;
+    display: flex; flex-direction: column; gap: 20px;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding-bottom: 16px; border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 20px; font-weight: 600; }
+  header span { color: var(--dim); font-size: 13px; }
+  .logo { font-size: 28px; }
+
+  .input-row {
+    display: flex; gap: 8px;
+  }
+  .input-row input {
+    flex: 1;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); font-size: 16px;
+    padding: 12px 16px; border-radius: var(--radius);
+    font-family: var(--mono); outline: none;
+    text-transform: uppercase;
+  }
+  .input-row input:focus { border-color: var(--accent); }
+  .input-row button {
+    background: var(--accent); color: #fff; border: none;
+    font-size: 15px; font-weight: 600;
+    padding: 12px 24px; border-radius: var(--radius);
+    cursor: pointer; transition: opacity .15s;
+  }
+  .input-row button:hover { opacity: .85; }
+  .input-row button:disabled { opacity: .4; cursor: not-allowed; }
+  .presets {
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  .presets button {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--dim); font-size: 12px; font-family: var(--mono);
+    padding: 4px 10px; border-radius: 4px; cursor: pointer;
+    transition: all .15s;
+  }
+  .presets button:hover { color: var(--text); border-color: var(--accent); }
+
+  .result {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px;
+    display: none; flex-direction: column; gap: 12px;
+    font-size: 14px; line-height: 1.6;
+  }
+  .result.visible { display: flex; }
+  .result-header {
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .result-header .badge {
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    padding: 2px 8px; border-radius: 4px;
+  }
+  .badge.up { background: rgba(63,185,80,.15); color: var(--green); }
+  .badge.down { background: rgba(248,81,73,.15); color: var(--red); }
+  .result-stats {
+    display: flex; gap: 16px; font-family: var(--mono); color: var(--dim); font-size: 13px;
+  }
+  .result-stats strong { color: var(--text); }
+
+  .progress {
+    display: flex; gap: 6px; padding: 8px 0;
+  }
+  .progress .step {
+    font-size: 11px; color: var(--dim); padding: 3px 8px;
+    border-radius: 4px; background: var(--surface);
+    border: 1px solid var(--border);
+    transition: all .3s;
+  }
+  .progress .step.active { color: var(--accent); border-color: var(--accent); }
+  .progress .step.done { color: var(--green); border-color: var(--green); }
+  .progress .step.error { color: var(--red); border-color: var(--red); }
+
+  .analysis {
+    white-space: pre-wrap;
+    padding: 12px 0; border-top: 1px solid var(--border);
+    font-size: 14px; line-height: 1.7;
+  }
+  .analysis .cursor::after {
+    content: '▊'; color: var(--accent);
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .error-msg {
+    color: var(--red); padding: 12px; background: rgba(248,81,73,.1);
+    border-radius: var(--radius); font-size: 13px;
+  }
+
+  .footer {
+    text-align: center; color: var(--dim); font-size: 11px;
+    padding-top: 16px;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="logo">📈</span>
+    <div>
+      <h1>Stock Analysis Agent</h1>
+      <span>Powered by kitegen · Real-time streaming</span>
+    </div>
+  </header>
+
+  <div class="input-row">
+    <input id="symbol" type="text" placeholder="Enter stock symbol..." value="AAPL" autofocus>
+    <button id="go" onclick="analyze()">Analyze</button>
+  </div>
+  <div class="presets">
+    <button onclick="pick('AAPL')">AAPL</button>
+    <button onclick="pick('GOOGL')">GOOGL</button>
+    <button onclick="pick('MSFT')">MSFT</button>
+    <button onclick="pick('NVDA')">NVDA</button>
+    <button onclick="pick('TSLA')">TSLA</button>
+  </div>
+
+  <div id="progress" class="progress"></div>
+  <div id="result" class="result">
+    <div class="result-header">
+      <strong id="result-symbol" style="font-family:var(--mono);font-size:18px;"></strong>
+      <span id="result-badge" class="badge"></span>
+    </div>
+    <div class="result-stats">
+      <span>Price: <strong id="result-price"></strong></span>
+      <span>1mo: <strong id="result-change"></strong></span>
+    </div>
+    <div id="analysis" class="analysis"></div>
+  </div>
+
+  <div class="footer">kitegen demo · <code>src/kitegen/</code> ~600 lines of Python</div>
+</div>
+
+<script>
+const nodes = ['fetch', 'history', 'analyze'];
+const el = (id) => document.getElementById(id);
+
+function pick(sym) {
+  el('symbol').value = sym;
+  analyze();
+}
+
+async function analyze() {
+  const symbol = el('symbol').value.trim().toUpperCase();
+  if (!symbol) return;
+
+  // Reset UI
+  el('result').classList.remove('visible');
+  el('analysis').textContent = '';
+  el('analysis').classList.add('cursor');
+  el('go').disabled = true;
+
+  // Build progress steps
+  const prog = el('progress');
+  prog.innerHTML = nodes.map(n =>
+    `<span class="step" id="step-${n}">⬤ ${n}</span>`
+  ).join(' → ');
+
+  try {
+    const resp = await fetch('/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol }),
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process SSE events
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop(); // keep incomplete chunk
+
+      for (const part of parts) {
+        for (const line of part.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const data = JSON.parse(line.slice(6));
+          handleEvent(data);
+        }
+      }
+    }
+  } catch (e) {
+    el('analysis').textContent = 'Connection error. Is the backend running?';
+    el('analysis').classList.remove('cursor');
+    el('result').classList.add('visible');
+  } finally {
+    el('go').disabled = false;
+  }
+}
+
+function handleEvent(data) {
+  switch (data.type) {
+    case 'node':
+      const step = el(`step-${data.node}`);
+      if (step) {
+        if (data.status === 'started') step.classList.add('active');
+        if (data.status === 'done') {
+          step.classList.remove('active');
+          step.classList.add('done');
+          step.textContent = '✓ ' + data.node;
+        }
+      }
+      break;
+
+    case 'token':
+      el('result').classList.add('visible');
+      const a = el('analysis');
+      a.textContent += data.content;
+      a.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      break;
+
+    case 'done':
+      el('analysis').classList.remove('cursor');
+      el('result-symbol').textContent = data.symbol;
+      if (data.trend) {
+        const badge = el('result-badge');
+        badge.textContent = data.trend.toUpperCase();
+        badge.className = 'badge ' + (data.trend === 'upward' ? 'up' : 'down');
+      }
+      el('result-price').textContent = data.price ? '$' + data.price : '—';
+      el('result-change').textContent = data.change_pct != null
+        ? (data.change_pct > 0 ? '+' : '') + data.change_pct + '%'
+        : '—';
+      break;
+
+    case 'error':
+      el('analysis').classList.remove('cursor');
+      el('analysis').innerHTML = '<div class="error-msg">' + data.message + '</div>';
+      el('result').classList.add('visible');
+      break;
+  }
+}
+
+// Enter key triggers analyze
+el('symbol').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') analyze();
+});
+</script>
+</body>
+</html>

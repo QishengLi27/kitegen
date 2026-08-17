@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+dist/
+
+# Environment & secrets (matches .env at any depth, e.g. demo/.env)
+.env
+.env.local
+.env.*.local
+
+# Frontend
+node_modules/
+demo/frontend/dist/
+
+# Personal data — real portfolio, alerts, monitor state
+demo/data/
+
+# Claude Code personal settings (permissions are machine-specific)
+.claude/settings.local.json
+
+# Test / tool artifacts
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.playwright-mcp/
+
+# OS
+.DS_Store

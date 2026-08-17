@@ -15,6 +15,7 @@ import kitegen as kg
 from demo.portfolio import Position, Portfolio, load_portfolio
 from demo.tools import (
     calculate_position_size,
+    compute_signal,
     get_fundamentals,
     get_technical_summary,
     lookup_stock,
@@ -188,9 +189,32 @@ def _get_llm() -> kg.OpenAIAdapter:
     Example .env for DeepSeek:
         LLM_API_KEY=sk-...
         LLM_API_BASE=https://api.deepseek.com/v1
-        LLM_MODEL=deepseek-reasoner
+        LLM_MODEL=deepseek-v4-flash
+
+    All agents share the module-level TokenTracker (llm_tracker) so token
+    usage and cost aggregate across the whole pipeline.
     """
-    return kg.OpenAIAdapter()
+    return kg.OpenAIAdapter(tracker=llm_tracker)
+
+
+# Shared across all agents — every LLM call records usage here.
+# Persisted to data/usage.json so usage survives server restarts.
+llm_tracker = kg.TokenTracker()
+
+
+def _load_usage_history() -> None:
+    import json as _json
+    from pathlib import Path as _Path
+
+    path = _Path(__file__).parent / "data" / "usage.json"
+    if path.exists():
+        try:
+            llm_tracker.load_records(_json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, _json.JSONDecodeError):
+            pass
+
+
+_load_usage_history()
 
 
 # Shared mandatory structure for every piece of trading advice
@@ -233,6 +257,7 @@ portfolio_analyst = kg.Agent(
         set_stop_loss,
         set_take_profit,
         calculate_position_size,
+        compute_signal,
         lookup_stock,
         get_fundamentals,
         get_technical_summary,
@@ -245,9 +270,11 @@ market_researcher = kg.Agent(
     role="stock researcher",
     goal="Understand a company from price, fundamentals, and technicals. "
          "Identify the trend regime (bull/bear/range) and the key levels "
-         "that would confirm or invalidate that regime.",
+         "that would confirm or invalidate that regime. "
+         "Always call compute_signal for a composite technical reading and "
+         "cite its signal, confidence, and key levels.",
     personality="Thorough and skeptical. Cite numbers.",
-    tools=[lookup_stock, get_fundamentals, get_technical_summary],
+    tools=[lookup_stock, get_fundamentals, get_technical_summary, compute_signal],
     llm=_get_llm(),
     max_iterations=4,
 )
@@ -257,11 +284,15 @@ trading_strategist = kg.Agent(
     goal=(
         "Turn research and portfolio context into concrete trading suggestions "
         "for the next few days and the next few weeks.\n\n"
+        "Always call compute_signal before giving short-term advice. "
+        "Base your stop-loss and take-profit levels on the key_levels it returns "
+        "(or justify a deviation with numbers).\n\n"
         + BIDIRECTIONAL_PLAN
     ),
     personality="Practical and risk-aware. Always include exit AND add-on scenarios.",
     tools=[
         get_technical_summary,
+        compute_signal,
         lookup_stock,
         calculate_position_size,
     ],
@@ -294,9 +325,42 @@ def _stage_prompt(state: dict, extra: str) -> str:
 
 
 async def _research_node(state: dict) -> dict:
-    """Stage 1: market_researcher studies the company."""
+    """Stage 1: market_researcher studies the company.
+
+    Research reports are cached per symbol (TTL hours — see demo.cache).
+    The cache holds the research TEXT only; later stages still fetch fresh
+    prices/indicators, so cached research never means stale advice.
+    """
+    from demo.cache import cache_research, get_cached_research
+
+    symbol = state.get("symbol")
+    force = bool(state.get("force_research"))
+
+    if symbol and not force:
+        cached = get_cached_research(symbol)
+        if cached:
+            state["research"] = cached["report"]
+            state["research_cached"] = True
+            await kg.stream_event({
+                "type": "stage",
+                "stage": "research",
+                "content": (
+                    f"{cached['report']}\n\n"
+                    f"(cached research report, generated {cached['generated_at']})"
+                ),
+            })
+            return state
+
     result = await market_researcher.execute({"input": _stage_prompt(state, "")})
     state["research"] = result.get("output", "")
+    state["research_cached"] = False
+
+    if symbol:
+        try:
+            cache_research(symbol, state["research"])
+        except OSError:
+            pass  # cache is best-effort
+
     await kg.stream_event(
         {"type": "stage", "stage": "research", "content": state["research"]}
     )

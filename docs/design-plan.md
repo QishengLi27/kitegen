@@ -1,6 +1,6 @@
 # kitegen Design & Implementation Plan
 
-> ⚠️ **历史文档（2026-07-24）** — 方向已合并进 [`strategy.md`](strategy.md)，本文保留作为六阶段初稿参考。
+> ⚠️ **Historical document (2026-07-24)** — direction has been merged into [`strategy.md`](strategy.md); kept as the six-phase draft reference.
 > Lightweight agent framework — composable agents, tasks, crews, and graphs.
 > Status: superseded by strategy.md
 
@@ -392,8 +392,8 @@ Instead of separate frameworks for agents, crews, and graphs, kitegen treats the
 
 | # | Task | Deliverable | Status |
 |---|---|---|---|
-| 3.1 | Refactor `Graph.add_node` to accept any `Executable` | `src/kitegen/graph.py` + tests | ◐ partial（`agent.execute` 可作 node；`as_executable` 包装未接入） |
-| 3.2 | Ensure `Agent`, `Task`, `Crew`, `Graph` all implement `Executable` | tests | ◐ partial（Agent/Graph ✅，Task/Crew 未建） |
+| 3.1 | Refactor `Graph.add_node` to accept any `Executable` | `src/kitegen/graph.py` + tests | ◐ partial (`agent.execute` works as node; `as_executable` wrapper not wired) |
+| 3.2 | Ensure `Agent`, `Task`, `Crew`, `Graph` all implement `Executable` | tests | ◐ partial (Agent/Graph ✅, Task/Crew not built) |
 | 3.3 | Add subgraph support | `src/kitegen/graph.py` | pending |
 | 3.4 | Add fan-out / fan-in execution pattern | `src/kitegen/graph.py` | pending |
 
@@ -401,20 +401,20 @@ Instead of separate frameworks for agents, crews, and graphs, kitegen treats the
 
 | # | Task | Deliverable | Status |
 |---|---|---|---|
-| 4.1 | Add human-in-the-loop primitive across all executables | `src/kitegen/interrupt.py` | ◐ partial（graph 中断/恢复 ✅；审批/超时/审计升级 pending → strategy F5） |
+| 4.1 | Add human-in-the-loop primitive across all executables | `src/kitegen/interrupt.py` | ◐ partial (graph interrupt/resume ✅; approval/timeout/audit upgrades pending → strategy F5) |
 | 4.2 | Add per-node timeouts | `src/kitegen/graph.py` | pending |
-| 4.3 | Harden streaming event handling | `src/kitegen/graph.py` | ◐ partial（流取消 ✅、checkpoint merge ✅；双流式统一 pending → strategy F1） |
+| 4.3 | Harden streaming event handling | `src/kitegen/graph.py` | ◐ partial (stream cancel ✅, checkpoint merge ✅; dual-stream unification pending → strategy F1) |
 | 4.4 | Add checkpoint versioning | `src/kitegen/checkpoint.py` | pending |
-| 4.5 | Add observability hooks (on_node_start, on_node_end, etc.) | `src/kitegen/observability.py` | pending → strategy F8（最小 trace，不接 OTel） |
+| 4.5 | Add observability hooks (on_node_start, on_node_end, etc.) | `src/kitegen/observability.py` | pending → strategy F8 (minimal trace, no OpenTelemetry) |
 
 ### Phase 5: Developer Experience
 
 | # | Task | Deliverable | Status |
 |---|---|---|---|
 | 5.1 | Add graph visualization export (Mermaid) | `src/kitegen/viz.py` | pending |
-| 5.2 | Create example gallery | `examples/` | ✅ done（`demo/` 股票助手为 flagship example） |
+| 5.2 | Create example gallery | `examples/` | ✅ done (`demo/` stock assistant is the flagship example) |
 | 5.3 | Write migration guide from LangGraph / CrewAI | `docs/` | pending |
-| 5.4 | Add FastAPI / worker runner examples | `examples/` | ✅ done（demo 手写 FastAPI+SSE；框架化 → strategy F4） |
+| 5.4 | Add FastAPI / worker runner examples | `examples/` | ✅ done (demo hand-rolls FastAPI+SSE; framework extraction → strategy F4) |
 | 5.5 | Build MkDocs site | `docs/` | pending → strategy F3 |
 
 ### Phase 6: Community & Release

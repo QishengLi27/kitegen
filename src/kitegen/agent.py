@@ -45,6 +45,8 @@ class Agent(Runnable):
         system_prompt: str | None = None,
         input_key: str = "input",
         output_key: str = "output",
+        output_schema: type | None = None,
+        memory: Any | None = None,
     ):
         self.role = role
         self.goal = goal
@@ -55,6 +57,13 @@ class Agent(Runnable):
         self._system_prompt = system_prompt
         self.input_key = input_key
         self.output_key = output_key
+        # Structured output: the final answer is parsed into an instance of
+        # this type (Pydantic BaseModel via model_validate_json, or any class
+        # constructed from the parsed dict). Parse failures raise ValueError.
+        self.output_schema = output_schema
+        # Pluggable memory (see kitegen.memory): previous exchanges are
+        # injected between the system prompt and the current user message.
+        self.memory = memory
 
     # ── System prompt ──────────────────────────────────────────────────
 
@@ -105,10 +114,11 @@ class Agent(Runnable):
             context = Context()
         node_name = context.node_name or self.role
 
-        messages: list[Message] = [
-            Message(role="system", content=self._render_system_prompt()),
-            Message(role="user", content=self._build_user_message(state)),
-        ]
+        user_text = self._build_user_message(state)
+        messages: list[Message] = [Message(role="system", content=self._render_system_prompt())]
+        if self.memory is not None:
+            messages.extend(self.memory.get())  # previous exchanges as context
+        messages.append(Message(role="user", content=user_text))
 
         tool_schemas = [t.to_openai_schema() for t in self.tools] if self.tools else None
         tool_map = {t.name: t for t in self.tools}
@@ -187,11 +197,50 @@ class Agent(Runnable):
 
             # Final answer — no tool calls
             _log.info("[%s] final answer (%d chars)", self.role, len(response.content or ""))
-            state[self.output_key] = response.content or ""
+            content = response.content or ""
+            state[self.output_key] = self._finalize_output(content, user_text)
             return state
 
         _log.warning("[%s] max iterations (%d) reached — returning last response", self.role, self.max_iterations)
 
         # Max iterations reached — use the last response as the answer
-        state[self.output_key] = response.content or "Unable to complete analysis."
+        content = response.content or "Unable to complete analysis."
+        state[self.output_key] = self._finalize_output(content, user_text)
         return state
+
+    def _finalize_output(self, content: str, user_text: str) -> Any:
+        """Parse structured output if a schema is set; record the exchange
+        in memory only after a successful parse (a failed parse must not
+        pollute the agent's memory with garbage)."""
+        if self.output_schema is None:
+            if self.memory is not None:
+                self.memory.add("user", user_text)
+                self.memory.add("assistant", content)
+            return content
+
+        import json
+        import re
+
+        cleaned = re.sub(
+            r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.MULTILINE
+        ).strip()
+
+        # Pydantic BaseModel
+        if hasattr(self.output_schema, "model_validate_json"):
+            parsed = self.output_schema.model_validate_json(cleaned)
+        else:
+            # Plain dataclass / constructor — parse dict and splat
+            try:
+                data = json.loads(cleaned)
+                parsed = self.output_schema(**data)
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to parse structured output as "
+                    f"{getattr(self.output_schema, '__name__', self.output_schema)}: {e}\n"
+                    f"Raw output: {content[:300]}"
+                ) from e
+
+        if self.memory is not None:
+            self.memory.add("user", user_text)
+            self.memory.add("assistant", content)
+        return parsed

@@ -64,6 +64,18 @@ class TokenTracker:
     def reset(self) -> None:
         self._records.clear()
 
+    def to_dict(self) -> list[dict]:
+        """Export records as a plain list of dicts (JSON-serializable)."""
+        return [dict(r) for r in self._records]
+
+    def load_records(self, records: list[dict]) -> None:
+        """Replace current records with previously exported ones.
+
+        Combined with to_dict(), this gives persistence across process
+        restarts: save to a file, reload on startup.
+        """
+        self._records = [dict(r) for r in records]
+
 
 # ── Circuit Breaker ─────────────────────────────────────────────────────
 

@@ -17,6 +17,10 @@ from typing import Any, Protocol
 PRICING: dict[str, dict[str, float]] = {
     "deepseek-chat":      {"input": 0.00027, "output": 0.00110},
     "deepseek-reasoner":  {"input": 0.00055, "output": 0.00219},
+    # DeepSeek V4 peak/off-peak scheme (2026-08-17, approx USD @7.2 CNY/USD,
+    # off-peak rates; peak hours are 2x). Update if you need exact billing.
+    "deepseek-v4-flash":  {"input": 0.00021, "output": 0.00063},
+    "deepseek-v4-pro":    {"input": 0.00076, "output": 0.00375},
     "gpt-4o":             {"input": 0.00250, "output": 0.01000},
     "gpt-4o-mini":        {"input": 0.00015, "output": 0.00060},
     "gpt-4.1-nano":       {"input": 0.00010, "output": 0.00040},
@@ -152,6 +156,7 @@ class OpenAIAdapter(LLMAdapter):
         base_url: str | None = None,
         model: str | None = None,
         client: Any | None = None,
+        tracker: Any | None = None,
     ):
         if model is None:
             import os
@@ -164,6 +169,10 @@ class OpenAIAdapter(LLMAdapter):
         self._client = client
         self._api_key = api_key
         self._base_url = base_url
+        # Optional TokenTracker (duck-typed to avoid a circular import —
+        # resilience imports Usage from this module). Every chat() call
+        # records its usage into it.
+        self.tracker = tracker
 
     def _ensure_client(self):
         if self._client is not None:
@@ -219,10 +228,14 @@ class OpenAIAdapter(LLMAdapter):
                     args = {}
                 tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
 
+        usage = Usage.from_openai(response.usage)
+        if self.tracker is not None:
+            self.tracker.record(model_name, usage)
+
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
-            usage=Usage.from_openai(response.usage),
+            usage=usage,
             model=model_name,
         )
 

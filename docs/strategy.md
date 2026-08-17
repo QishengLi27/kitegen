@@ -1,131 +1,189 @@
-# kitegen 战略文档
+# kitegen Strategy
 
-> 本文是项目唯一权威战略文档，合并并取代 `design-plan.md` 和 `demo-roadmap.md` 的方向部分（两者保留为历史参考）。
-> 更新日期：2026-08-16
-
----
-
-## 1. 目标
-
-两个互相驱动的目标：
-
-1. **kitegen**：持续优化为生产级 agent 框架，独树一帜。
-2. **股票助手**：给自己打造一个全能交易搭档（analysis + discipline + alerts，不做真下单）。
-
-核心思路：**股票助手是框架的试金石 — 每个框架能力由真实需求驱动，每个助手功能反过来验证框架定位。**
+> This is the single authoritative strategy document. It merges and supersedes the direction sections of `design-plan.md` and `demo-roadmap.md` (both kept as historical reference).
+> Last updated: 2026-08-17
 
 ---
 
-## 2. 定位
+## 1. Goals
 
-> **kitegen = 构建可人机协作的 AI 工作流的 Python 框架。Agent、Task、Crew、Graph 任意组合，一键部署为脚本 / API / Worker / Stream。**
+Two mutually reinforcing goals:
 
-差异化支柱：
+1. **kitegen**: continuously evolve into a production-grade agent framework with a distinctive identity.
+2. **Stock assistant**: build an all-in-one trading partner for personal use (analysis + discipline + alerts, no real order execution).
 
-| 支柱 | 现状 | 目标 |
-|------|------|------|
-| **一切皆 Executable** | Agent/Graph/函数统一协议 ✅ | Task/Crew 也走同一协议，Agent 可 delegate 子 Agent |
-| **人机协作原生** | `interrupt()` + `resume()` 基础版 | 审批层级、超时升级、编辑中间结果、审计日志 |
-| **写一次，到处跑** | 无 | `to_fastapi() / to_worker() / to_cli() / to_sse()` |
-| **中文生态优先** | 腾讯行情、A股工具链、DeepSeek 适配 ✅ | 中文文档、A股数据源内置、开源第一中国 agent 框架 |
-| **流式可观测** | 两套并行流式机制（技术债） | 统一事件系统：任意嵌套深度的 token/tool/节点事件一条流 |
+Core idea: **the stock assistant is the framework's proving ground — every framework capability is driven by a real need, and every assistant feature validates the framework's positioning.**
 
 ---
 
-## 3. kitegen 框架方向
+## 2. Positioning
 
-### 3.1 已完成 ✅
+> **kitegen = a Python framework for building AI workflows with human-in-the-loop. Agent, Task, Crew, Graph compose freely; deploy with one line as script / API / Worker / Stream.**
 
-- Executable 协议 + Context + RetryPolicy + 事件体系（`core.py`）
-- `@tool` 装饰器 + 类型注解 schema 推断（`tool.py`）
-- LLM 适配器：OpenAI / Anthropic / LiteLLM（`llm.py`）
-- Agent 类：ReAct 工具循环、persona 渲染、max_iterations（`agent.py`）
-- Graph：流式、中断恢复、条件路由、checkpoint **合并语义**、流取消（`graph.py`）
-- Resilience：CircuitBreaker、TokenTracker、Usage 成本核算
-- Checkpointer：MemorySaver / PostgresSaver
-- **35 个测试全绿**
+Differentiation pillars:
 
-### 3.2 待做（按优先级）
-
-| # | 工作 | 为什么 |
-|---|------|--------|
-| F1 | **统一流式事件系统** | 最大技术债。graph 的 ContextVar 队列与 `context.stream()` 两套并存，Agent 嵌套进 graph 时事件丢失，token 是"跑完补发"的假流式。统一后任意嵌套的事件一条流到调用方 |
-| F2 | **Adapter 级 token 流式** | LLM adapter 加 `chat_stream()`，Agent 循环发 `TokenEvent` — 真流式 |
-| F3 | **发布 PyPI v0.2 + 文档站** | 框架已 600+ 行、测试全绿。不发布就没有用户反馈循环。文档用 MkDocs，配 LangGraph/CrewAI 迁移对照页 |
-| F4 | **部署层：`to_fastapi()/to_worker()/to_cli()`** | 杀手锏。LangGraph/CrewAI 停在"库"，部署自己想办法。demo 手写的 FastAPI+SSE 就是蓝图 |
-| F5 | **人机协作升级** | 审批层级（不同阈值路由不同人）、超时+escalation、编辑中间结果再返回、审计日志。金融场景"建议卖出，请确认"是刚需 |
-| F6 | **Memory 协议** | `Memory(Protocol): add()/get()` + 内置 `BufferMemory`。与 `LLMAdapter` 同一插拔模式 |
-| F7 | **结构化输出** | Agent 支持 `output_schema`，产出 `StockAnalysis(rating, rationale, days_plan, weeks_plan)` 这类可验证结果 |
-| F8 | **最小可观测性** | 结构化 trace：每节点耗时/token成本/完整 message 记录，JSONL 输出。**不接 OpenTelemetry**（太重），Langfuse 以后做插件 |
-| F9 | **checkpoint 版本化** | `save(state, thread_id, step=N)`，支持回放/回滚 |
-| F10 | Task / Crew 轻量版 | Task（模板+executable+output_key）、Crew 做 Graph 语法糖，不引入新运行时 |
-| F11 | **插件接口** | 等真实需求定义。过早建插件市场 = 机场没建就买飞机 |
+| Pillar | Now | Target |
+|--------|-----|--------|
+| **Everything is Executable** | Agent/Graph/function share one protocol ✅ | Task/Crew on the same protocol; Agent can delegate to sub-agents |
+| **Human-in-the-loop native** | Basic `interrupt()` + `resume()` | Approval tiers, timeout+escalation, edit-in-loop, audit log |
+| **Write once, run anywhere** | — | `to_fastapi() / to_worker() / to_cli() / to_sse()` |
+| **China ecosystem first** | Tencent quotes, A-share tooling, DeepSeek adapters ✅ | Chinese docs, built-in A-share data sources |
+| **Streaming observability** | Two parallel streaming paths (tech debt) | One unified event system: token/tool/node events from any nesting depth flow in a single stream |
 
 ---
 
-## 4. 股票助手方向
+## 3. kitegen Framework Directions
 
-### 4.1 已完成 ✅
+### 3.1 Done ✅
 
-- Portfolio 数据模型 + JSON 持久化（`portfolio.py`）
-- 持仓工具：get/list/record/remove/set_stop_loss/set_take_profit（`agents.py`）
-- 三步流水线：研究 → 策略 → 个性化建议（kitegen Graph 串联三 Agent）
-- 腾讯行情（A股/HK/US）+ smartbox 动态名称解析（`tools.py`）
-- 基本面 + 技术面（MA20/50、RSI14、趋势信号）
-- React 前端：阶段步进器、持仓芯片（实时盈亏）、markdown 渲染、分析过程收起/展开、终止按钮
-- 会话历史 + 当前问题分离（checkpoint merge 语义后同 tid 自然工作）
+- Executable protocol + Context + RetryPolicy + event system (`core.py`)
+- `@tool` decorator with type-hint schema inference (`tool.py`)
+- LLM adapters: OpenAI / Anthropic / LiteLLM (`llm.py`) — env-driven models (`LLM_MODEL`), optional usage tracker
+- Agent class: ReAct tool loop, persona rendering, max_iterations (`agent.py`)
+- Graph: streaming with cancel, interrupt/resume, conditional routing, checkpoint **merge semantics** (`graph.py`)
+- Resilience: CircuitBreaker, TokenTracker (serializable), Usage cost tracking
+- Checkpointer: MemorySaver / PostgresSaver
+- `to_worker()` scheduling (`deploy.py`)
+- **45 tests, all green**
 
-### 4.2 待做（按优先级）
+### 3.2 To Do (by priority)
 
-| # | 工作 | 价值 |
-|---|------|------|
-| S1 | **盯盘告警**：止损/止盈触发、单日异动、每早 9 点市场简报 | 从"问才答"变"主动找你" — 杀手锏 |
-| S2 | **个人投资规则引擎**：把纪律编码（"亏损 8% 必须止损"、"新仓 ≤10% 资金"），建议前检查 | "聊天工具"变"个人交易系统" |
-| S3 | **Trade Plan 工具**：entry/stop/target/position size/R:R 结构化输出 | 建议可执行 |
-| S4 | **Paper trading + 交易日志**：记录模拟交易，追踪胜率、盈亏比、回撤 | 验证策略再实战 |
-| S5 | **A股数据源扩展**：公告/财报（巨潮/东财）、资金流向、龙虎榜、新闻情绪 | 分析深度 |
-| S6 | **技术指标扩展**：MACD、KDJ、BOLL、ATR、量比 | 每个都是纯函数 `@tool` |
-| S7 | **组合风控**：行业集中度、相关性、权重偏离告警 | 风险意识 |
-| S8 | **Watchlist + 条件扫描**：关注股票设置条件，定期扫描匹配 | 机会发现 |
-| S9 | **多模态触达**：Telegram bot、邮件日报、语音播报 | 全天候 |
-| S10 | **图表可视化**：K线/RSI/资金曲线图 | 一眼看懂 |
-
-数据源原则：**中国优先**。腾讯行情 + 东财/巨潮为主，不引入美股工具链（用户的持仓是 A股+HK+US 混合，腾讯已覆盖）。
-
----
-
-## 5. 统一执行顺序
-
-每步都是框架能力和助手需求互相驱动：
-
-| 步骤 | 工作 | 框架产出 | 助手产出 |
-|------|------|---------|---------|
-| 1 | F1 统一流式 + F2 真流式 | 事件系统一致 | UI 真 token 流、嵌套 Agent 事件可见 |
-| 2 | F3 发布 PyPI + 文档 | 反馈循环开始 | — |
-| 3 | F4 部署层 | `to_fastapi/to_worker` | S1 盯盘告警的 worker 底座 |
-| 4 | S1 盯盘告警 | worker runner 实战验证 | 止损/异动/早报 |
-| 5 | F5 人机协作升级 | 审批/超时/审计 | "建议卖出，请确认" |
-| 6 | S2 规则引擎 + S3 Trade Plan | F7 结构化输出 | 纪律检查 + 可执行建议 |
-| 7 | S4 paper trading + S5 数据源 + S6 指标 | F6 Memory、F8 trace、F9 版本化 | 验证策略 + 深度分析 |
-| 8 | F10 Task/Crew + F11 插件 | 生态开放 | S8 watchlist、S9 多模态、S10 图表 |
+| # | Work | Why |
+|---|------|-----|
+| F1 | **Unified streaming event system** | Biggest tech debt. Graph ContextVar queue and `context.stream()` coexist; agent events are lost when nested in a graph; tokens are "replayed after the fact". After unification, events from any depth flow in one stream |
+| F2 | **Adapter-level token streaming** | LLM adapters get `chat_stream()`; Agent loop emits `TokenEvent` — true streaming |
+| F3 | **Publish PyPI v0.2 + docs site** | Framework is 600+ lines, tests green. No publish = no user feedback loop. MkDocs site + LangGraph/CrewAI migration guide |
+| F4 | **Deployment layer: `to_fastapi()/to_worker()/to_cli()`** | Killer feature. LangGraph/CrewAI stop at "library". The demo's hand-rolled FastAPI+SSE is the blueprint |
+| F5 | **HITL upgrades** | Approval tiers (different thresholds route to different people), timeout+escalation, edit intermediate results, audit log. "Suggest sell, confirm with human" is a finance must-have |
+| F6 | **Memory protocol** | `Memory(Protocol): add()/get()` + built-in `BufferMemory`. Same pluggable pattern as `LLMAdapter` |
+| F7 | **Structured output** | Agent supports `output_schema`, producing verifiable results like `StockAnalysis(rating, rationale, days_plan, weeks_plan)` |
+| F8 | **Minimal observability** | Structured trace: per-node latency/token cost/full message record, JSONL output. **No OpenTelemetry** (too heavy); Langfuse as a plugin later |
+| F9 | **Checkpoint versioning** | `save(state, thread_id, step=N)` for replay/rollback |
+| F10 | Task / Crew (lightweight) | Task (template + executable + output_key); Crew as Graph syntactic sugar, no new runtime |
+| F11 | **Plugin interface** | Let real needs define it. Building a plugin market before users = buying planes before an airport |
 
 ---
 
-## 6. 不做的事（Non-Goals）
+## 4. Stock Assistant Directions
 
-- 真下单/券商对接（决策支持，不执行）
-- OpenTelemetry 直连（先做最小 trace，以后插件化）
-- 美股专用工具链（Alpha Vantage/Finnhub/websocket 行情 — 中国优先）
-- 过早的插件市场
-- 向量数据库/RAG 框架内置（RAG 是工具模式，不是框架功能）
+### 4.1 Done ✅
+
+- Portfolio data model + JSON persistence (`portfolio.py`)
+- Position tools: get/list/record/remove/set_stop_loss/set_take_profit (`agents.py`)
+- 3-agent pipeline: research → strategy → personalized advice (kitegen Graph)
+- **S1 Market monitoring**: stop-loss/take-profit/move checks + daily briefing via `kg.to_worker`, webhook notifications + frontend alerts panel
+- **S6 Indicators (partial)**: `compute_signal` transparent vote-based regime (trend/momentum/MACD) + full indicator engine (MACD/ATR/Bollinger) + ATR key levels
+- **Research report cache**: research stage cached per symbol + TTL, separated from real-time advice (~26% token savings on same-symbol follow-ups)
+- **Bidirectional trade plans**: every recommendation must have exit / add-on / do-nothing scenarios + `calculate_position_size` risk sizing
+- Tencent quotes (A-share/HK/US) + smartbox dynamic name resolution (`tools.py`)
+- Fundamentals + technicals (MA20/50, RSI14, trend regime)
+- React frontend: portfolio panel (CRUD form + live price polling), stage stepper, markdown rendering, stop button, alerts panel, expandable briefing
+- Session history + current-question separation (checkpoint merge semantics)
+- **Usage tracking**: persistent `TokenTracker` (survives restarts) + live footer display
+
+### 4.2 To Do (by priority)
+
+| # | Work | Value |
+|---|------|-------|
+| S1 | **Market monitoring**: stop/target triggers, daily moves, 8:50 morning briefing | From "answer when asked" to "reach out proactively" — killer feature |
+| S2 | **Personal rules engine**: encode discipline ("cut loss at -8%", "new position ≤ 10% capital") checked before every recommendation | From chat tool to personal trading system |
+| S3 | **Trade Plan tool**: structured entry/stop/target/position size/R:R output | Actionable advice |
+| S4 | **Paper trading + trade journal**: simulated trades, win rate, profit factor, drawdown | Validate strategy before real money (see §4.3) |
+| S5 | **A-share data sources**: announcements/filings (CNINFO/Eastmoney), capital flow, Dragon-Tiger list, news sentiment | Analysis depth |
+| S6 | **Indicator expansion**: MACD, KDJ, BOLL, ATR, volume ratio | Each is a pure-function `@tool` |
+| S7 | **Portfolio risk**: sector concentration, correlation, weight deviation alerts | Risk awareness |
+| S8 | **Watchlist + conditional scans**: conditions per watched symbol, periodic matching | Opportunity discovery |
+| S9 | **Multi-channel reach**: Telegram bot, email reports, voice | All-day coverage |
+| S10 | **Chart visualization**: K-line/RSI/equity curve images | See it at a glance |
+
+Data source principle: **China first**. Tencent quotes + Eastmoney/CNINFO primary; no US-market tooling (portfolio is A-share + HK + US mixed; Tencent covers all).
+
+### 4.3 S4 Paper Trading — Detailed Spec (new requirement)
+
+> Goal: manually configure a simulated trading agent that watches the market and trades automatically, to **test the agent's trading ability** (validate in simulation before going live).
+
+#### Configuration (all manually adjustable)
+
+```python
+paper_config = {
+    "initial_capital": 500_000,     # starting capital
+    "check_interval_min": 30,       # how often to check the market
+    "max_position_pct": 0.20,       # max position size (% of equity)
+    "stop_loss_pct": 0.08,          # stop-loss discipline (can be overridden by signal key levels)
+    "t_plus_1": True,               # T+1: shares bought today sellable tomorrow at the earliest
+    "fee_rate": 0.0003,             # commission (optional, default 0.03%)
+    "enabled_symbols": None,        # None = all held + watchlisted, or an explicit list
+}
+```
+
+#### Trading engine rules
+
+1. **Watch loop**: reuses `kg.to_worker()`, interval = `check_interval_min`. Each tick: fetch quotes → `compute_signal` → rule engine decides → simulate execution.
+2. **Decision source**: `trading_strategist` recommendations (reuse the pipeline's strategy stage) + hard-rule interception (position cap, T+1, forced stop-loss).
+3. **T+1 constraint**: engine validates `sellable_date = buy_date + 1`; refuses early sells. Applies to A-shares only (`.SS`/`.SZ`); US/HK have no such restriction.
+4. **Simulated fill price**: current quote at check time (no order-book simulation).
+5. **Isolated from real holdings**: separate virtual account + separate data files; never touches the `default` portfolio or live alerts.
+
+#### Persistence (`demo/data/paper/`)
+
+| File | Content |
+|------|---------|
+| `paper/account.json` | Virtual account: cash, positions, equity-curve snapshots |
+| `paper/config.json` | The config above (edit + restart to apply) |
+| `paper/trades.json` | Every trade: time, direction, price, quantity, **decision rationale** (the agent's recommendation text), signal value |
+
+#### Capability evaluation (does the agent actually trade well?)
+
+| Metric | Formula |
+|--------|---------|
+| Total return | ending equity / initial capital − 1 |
+| Win rate | winning closed trades / total closed trades |
+| Profit factor | average win / average loss |
+| Max drawdown | peak-to-trough of the equity curve |
+| Benchmark | vs buy-and-hold (same capital, same initial holdings) vs CSI 300 |
+
+Output: trade ledger + evaluation report (weekly/monthly), plus a Paper Trading page in the frontend showing the equity curve and trade history.
+
+#### Why this shape
+
+- Reuses all existing infrastructure: pipeline signals/strategy, monitor worker pattern, portfolio model, usage stats
+- "Manual config + automatic execution" is the second piece of the F4 deployment layer (`to_worker` is already in place)
+- Everything lands on disk → replayable, auditable, comparable across configs (change parameters and rerun)
 
 ---
 
-## 7. 文档索引
+## 5. Unified Execution Order
 
-| 文档 | 状态 |
-|------|------|
-| `docs/strategy.md` | **权威** — 定位 + 双线方向 + 执行顺序 |
-| `docs/design-plan.md` | 历史 — 框架六阶段初稿，已合并进本文 |
-| `docs/demo-roadmap.md` | 历史 — 助手五阶段初稿，已合并进本文 |
-| `docs/superpowers/specs/*` | 历史 — 已实现的 stream/agent 设计规格 |
+Each step makes framework capability and assistant needs drive each other:
+
+| Step | Work | Framework output | Assistant output |
+|------|------|------------------|------------------|
+| 1 | F1 unified streaming + F2 true token streaming | Consistent event system | Real token streaming UI; nested agent events visible |
+| 2 | F3 publish PyPI + docs | Feedback loop starts | — |
+| 3 | F4 deployment layer | `to_fastapi/to_worker` | Worker base for S1 monitoring |
+| 4 | S1 market monitoring | Worker runner battle-tested | Stop/move/briefing alerts |
+| 5 | F5 HITL upgrades | Approval/timeout/audit | "Suggest sell, confirm with human" |
+| 6 | S2 rules engine + S3 Trade Plan | F7 structured output | Discipline checks + actionable advice |
+| 7 | S4 paper trading + S5 data sources + S6 indicators | F6 Memory, F8 trace, F9 versioning | Strategy validation + analysis depth |
+| 8 | F10 Task/Crew + F11 plugins | Ecosystem opens up | S8 watchlist, S9 multi-channel, S10 charts |
+
+---
+
+## 6. Non-Goals
+
+- Real order execution / brokerage integration (decision support, not execution)
+- Direct OpenTelemetry (minimal trace first; plugin later)
+- US-market tooling (Alpha Vantage/Finnhub/websocket quotes — China first)
+- Premature plugin marketplace
+- Built-in vector DB / RAG framework (RAG is a tool pattern, not a framework feature)
+
+---
+
+## 7. Document Index
+
+| Document | Status |
+|----------|--------|
+| `docs/strategy.md` | **Authoritative** — positioning + dual-track directions + execution order |
+| `docs/design-plan.md` | Historical — six-phase framework draft, merged here |
+| `docs/demo-roadmap.md` | Historical — five-phase assistant draft, merged here |
+| `docs/superpowers/specs/*` | Historical — implemented stream/agent design specs |

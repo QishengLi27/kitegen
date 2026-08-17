@@ -1,6 +1,6 @@
 # kitegen Stock Analyst Demo — Roadmap
 
-> ⚠️ **历史文档** — 方向已合并进 [`strategy.md`](strategy.md)，本文保留作为助手功能初稿参考。
+> ⚠️ **Historical document** — direction has been merged into [`strategy.md`](strategy.md); kept as the assistant feature draft reference.
 > Goal: evolve the demo into a personal stock analyst that helps track portfolios, analyze opportunities, and execute a disciplined trading strategy.
 > Disclaimer: this is an analysis and decision-support tool, not financial advice.
 
@@ -40,16 +40,16 @@ Built on kitegen, so every new feature also forces the framework to become more 
 1. **Portfolio data model** ✅
    - Store positions, cost basis, shares, target allocation. ✅
    - Track cash balance and buying power. ✅
-   - Persist to a JSON file or SQLite database. ✅（JSON）
+   - Persist to a JSON file or SQLite database. ✅ (JSON)
 
 2. **Portfolio analysis tools** ✅
-   - `portfolio_value()`: total value, cash, equity. ✅（`Portfolio.equity`）
-   - `position_pnl(symbol)`: realized + unrealized P&L. ✅（`position_pnl/all_pnl`）
-   - `portfolio_allocation()`: sector/geography/stock weights. ◐（权重 ✅，行业/地域 pending）
+   - `portfolio_value()`: total value, cash, equity. ✅ (`Portfolio.equity`)
+   - `position_pnl(symbol)`: realized + unrealized P&L. ✅ (`position_pnl/all_pnl`)
+   - `portfolio_allocation()`: sector/geography/stock weights. ◐ (weights ✅, sector/geography pending)
    - `biggest_losers()`: positions with largest unrealized losses. ✅
 
 3. **Portfolio-aware agent** ✅
-   - Agent reads the user's portfolio before answering. ✅（三步流水线 advice 阶段）
+   - Agent reads the user's portfolio before answering. ✅ (advice stage of the 3-agent pipeline)
    - "Should I sell my losing NVDA position?" → agent sees cost basis, current P&L, allocation impact. ✅
 
 ### Phase B: Trading Discipline
@@ -59,8 +59,8 @@ Built on kitegen, so every new feature also forces the framework to become more 
    - Position sizing based on risk per trade (e.g. 1% of portfolio).
 
 5. **Stop-loss / take-profit tracking** ◐
-   - User sets alerts per position. ✅（`set_stop_loss`/`set_take_profit` 工具）
-   - Agent evaluates daily whether any alerts triggered. ❌ pending → strategy S1 盯盘告警
+   - User sets alerts per position. ✅ (`set_stop_loss`/`set_take_profit` tools)
+   - Agent evaluates daily whether any alerts triggered. ❌ pending → strategy S1 market monitoring
 
 6. **Loss-recovery helper** — pending
    - Identify losing positions and suggest options: hold / average down / cut loss.
@@ -78,10 +78,10 @@ Built on kitegen, so every new feature also forces the framework to become more 
    - Agent fetches daily, weekly, monthly data.
 
 10. **Technical indicators** ◐
-    - MA20/50、RSI14、趋势信号 ✅
-    - MACD、KDJ、Bollinger Bands、ATR ❌ pending → strategy S6
+    - MA20/50, RSI14, trend signal ✅
+    - MACD, KDJ, Bollinger Bands, ATR ❌ pending → strategy S6
 
-11. **Earnings / event calendar** — pending → strategy S5（公告/财报数据源）
+11. **Earnings / event calendar** — pending → strategy S5 (announcements/filings data source)
 
 ### Phase D: Execution & Review
 
@@ -89,16 +89,16 @@ Built on kitegen, so every new feature also forces the framework to become more 
 
 13. **Trade journal** — pending → strategy S4
 
-14. **Scheduled reports** — pending → strategy S1（每日早报）
+14. **Scheduled reports** — pending → strategy S1 (daily briefing)
 
 15. **Exportable reports** — pending
 
 ### Phase E: UX & Distribution
 
 16. **Web dashboard** ◐
-    - Portfolio overview page. ◐（持仓芯片 ✅；完整 dashboard pending）
+    - Portfolio overview page. ◐ (position chips ✅; full dashboard pending)
     - Watchlist page. ❌
-    - Chat + reports side-by-side. ◐（chat + 阶段流水线 ✅）
+    - Chat + reports side-by-side. ◐ (chat + stage pipeline ✅)
 
 17. **Notifications** — pending → strategy S1/S9
 

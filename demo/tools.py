@@ -160,8 +160,25 @@ def _format_stock_data(data: dict[str, Any]) -> str:
 
 
 def fetch_stock(symbol: str) -> dict[str, Any] | None:
-    """Fetch stock data from the best available source."""
+    """Fetch stock data from the best available source.
+
+    China-first ordering: A-shares (.SS/.SZ) and HK go to Tencent first —
+    yahooquery is slow/unreliable for them on this network and is the
+    fallback. US symbols try yahooquery first, then Tencent.
+    """
     symbol = symbol.upper().strip()
+    is_cn = symbol.endswith(".SS") or symbol.endswith(".SZ") or symbol.endswith(".HK")
+
+    if is_cn:
+        try:
+            return _fetch_tencent(symbol)
+        except Exception:
+            pass
+        try:
+            return _fetch_yahooquery(symbol)
+        except Exception:
+            pass
+        return None
 
     try:
         return _fetch_yahooquery(symbol)
@@ -448,13 +465,31 @@ def calculate_position_size(
     )
 
 
-def _compute_technicals(closes: list[float]) -> dict[str, Any]:
-    """Compute MA20, MA50, RSI(14) and trend signal from a closes list."""
+def _compute_indicators(bars: list[dict[str, float]]) -> dict[str, Any]:
+    """Compute the full indicator set from OHLC bars.
+
+    Single source of truth for all indicator math. Bars: [{"close": c, "high": h, "low": l}, ...]
+    Returns rsi14, ma20, ma50, macd (line/signal/hist), atr14, bollinger, and a
+    simple trend regime ("bullish"/"bearish"/"mixed").
+    """
+    closes = [b["close"] for b in bars]
+
     def sma(period: int) -> float:
         if len(closes) < period:
             return 0.0
         return round(sum(closes[-period:]) / period, 2)
 
+    def ema(series: list[float], period: int) -> list[float]:
+        """Exponential moving average series."""
+        if len(series) < period:
+            return []
+        k = 2.0 / (period + 1)
+        out = [sum(series[:period]) / period]
+        for x in series[period:]:
+            out.append(x * k + out[-1] * (1 - k))
+        return out
+
+    # RSI(14) — simple average gains/losses
     def rsi(period: int = 14) -> float:
         if len(closes) < period + 1:
             return 0.0
@@ -472,6 +507,57 @@ def _compute_technicals(closes: list[float]) -> dict[str, Any]:
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1 + rs)), 2)
 
+    # MACD(12, 26, 9)
+    macd_line: list[float] = []
+    macd_signal: list[float] = []
+    hist = 0.0
+    macd_state = "flat"
+    ema12 = ema(closes, 12)
+    ema26 = ema(closes, 26)
+    if ema12 and ema26:
+        n = min(len(ema12), len(ema26))
+        macd_line = [ema12[-n + i] - ema26[-n + i] for i in range(n)]
+        macd_signal = ema(macd_line, 9)
+        if len(macd_signal) >= 2:
+            hist = round(macd_line[-1] - macd_signal[-1], 4)
+            # Cross detection over the last 3 bars — the -1 bound keeps
+            # macd_signal[-i-1] in range for short histories
+            for i in range(1, min(3, len(macd_signal) - 1) + 1):
+                if macd_line[-i] > macd_signal[-i] and macd_line[-i - 1] <= macd_signal[-i - 1]:
+                    macd_state = "bullish_cross"
+                    break
+                if macd_line[-i] < macd_signal[-i] and macd_line[-i - 1] >= macd_signal[-i - 1]:
+                    macd_state = "bearish_cross"
+                    break
+            else:
+                macd_state = "bullish" if hist > 0 else "bearish"
+
+    # ATR(14)
+    atr = 0.0
+    if len(bars) >= 15:
+        trs: list[float] = []
+        for i in range(1, len(bars)):
+            h, l, pc = bars[i]["high"], bars[i]["low"], bars[i - 1]["close"]
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        atr = round(sum(trs[-14:]) / 14, 4)
+
+    # Bollinger(20, 2)
+    boll = {"upper": 0.0, "mid": 0.0, "lower": 0.0, "position": "unknown"}
+    if len(closes) >= 20:
+        mid = sma(20)
+        window = closes[-20:]
+        std = (sum((c - mid) ** 2 for c in window) / 20) ** 0.5
+        boll = {
+            "upper": round(mid + 2 * std, 2),
+            "mid": round(mid, 2),
+            "lower": round(mid - 2 * std, 2),
+            "position": (
+                "upper" if closes[-1] >= mid + 2 * std else
+                "lower" if closes[-1] <= mid - 2 * std else
+                "middle"
+            ),
+        }
+
     current = closes[-1]
     ma20 = sma(20)
     ma50 = sma(50)
@@ -479,57 +565,213 @@ def _compute_technicals(closes: list[float]) -> dict[str, Any]:
 
     if ma20 and ma50:
         if current > ma20 > ma50:
-            signal = "bullish"
+            trend = "bullish"
         elif current < ma20 < ma50:
-            signal = "bearish"
+            trend = "bearish"
         else:
-            signal = "mixed"
+            trend = "mixed"
     else:
-        signal = "insufficient data"
+        trend = "insufficient data"
 
-    return {"current": round(current, 2), "ma20": ma20, "ma50": ma50,
-            "rsi14": rsi14, "signal": signal}
+    return {
+        "current": round(current, 2),
+        "ma20": ma20,
+        "ma50": ma50,
+        "rsi14": rsi14,
+        "macd_line": round(macd_line[-1], 4) if macd_line else 0.0,
+        "macd_signal": round(macd_signal[-1], 4) if macd_signal else 0.0,
+        "macd_hist": hist,
+        "macd_state": macd_state,
+        "atr14": atr,
+        "bollinger": boll,
+        "trend": trend,
+    }
+
+
+def _get_history(symbol: str, days: int = 80) -> list[dict[str, float]] | None:
+    """Fetch OHLC daily bars — Tencent-first for A-shares/HK (China-first
+    ordering), yahooquery for US, with the other as fallback."""
+    sym = resolve_symbol(symbol) or symbol.upper().strip()
+    is_cn = sym.endswith(".SS") or sym.endswith(".SZ") or sym.endswith(".HK")
+
+    def _from_yahooquery() -> list[dict[str, float]] | None:
+        from yahooquery import Ticker
+
+        t = Ticker(sym)
+        hist = t.history(period="6mo")
+        if isinstance(hist, dict):
+            hist = hist.get(sym)
+        if hist is not None and not hist.empty:
+            df = hist.dropna(subset=["close"])
+            bars = [
+                {"close": float(r.close), "high": float(r.high), "low": float(r.low)}
+                for r in df.itertuples()
+            ]
+            if len(bars) >= 20:
+                return bars[-days:]
+        return None
+
+    def _from_tencent() -> list[dict[str, float]] | None:
+        code = _to_tencent_code(sym)
+        if not code:
+            return None
+        kline_code = code + ".OQ" if code.startswith("us") else code
+        hr = requests.get(
+            f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+            f"?param={kline_code},day,,,{days},qfq",
+            timeout=10,
+        ).json()
+        code_data = hr.get("data", {}).get(kline_code, {})
+        key = "qfqday" if "qfqday" in code_data else "day"
+        rows = code_data.get(key, [])
+        bars = [
+            # row format: [date, open, close, high, low, volume]
+            {"close": float(r[2]), "high": float(r[3]), "low": float(r[4])}
+            for r in rows if len(r) > 4 and r[2]
+        ]
+        return bars if len(bars) >= 20 else None
+
+    primary, fallback = (_from_tencent, _from_yahooquery) if is_cn else (_from_yahooquery, _from_tencent)
+    for fetcher in (primary, fallback):
+        try:
+            bars = fetcher()
+            if bars:
+                return bars
+        except Exception:
+            pass
+
+    return None
+
+
+def _compute_technicals(closes: list[float]) -> dict[str, Any]:
+    """Backward-compat wrapper: full indicators from a closes list (no OHLC)."""
+    bars = [{"close": c, "high": c, "low": c} for c in closes]
+    return _compute_indicators(bars)
 
 
 @kg.tool
 def get_technical_summary(symbol: str) -> str:
-    """Compute RSI and moving averages for a stock."""
+    """Compute RSI, moving averages, MACD, ATR, and Bollinger for a stock."""
     sym = resolve_symbol(symbol) or symbol.upper().strip()
+    bars = _get_history(sym)
+    if not bars:
+        return f"Not enough price history to compute technicals for {sym}."
 
-    # Try yahooquery history first (works for US + some HK)
-    try:
-        from yahooquery import Ticker
+    tech = _compute_indicators(bars)
+    if not tech["ma20"]:
+        return f"Not enough price history to compute technicals for {sym}."
 
-        t = Ticker(sym)
-        hist = t.history(period="3mo")
-        if isinstance(hist, dict):
-            hist = hist.get(sym)
-        if hist is not None and not hist.empty:
-            closes = [float(x) for x in hist["close"].dropna().tolist()]
-            if len(closes) >= 20:
-                tech = _compute_technicals(closes)
-                if tech["ma20"]:
-                    return (
-                        f"Technical summary for {sym}:\n"
-                        f"Current: {tech['current']} | 20-day MA: {tech['ma20']} | 50-day MA: {tech['ma50']}\n"
-                        f"RSI(14): {tech['rsi14']} (overbought >70, oversold <30)\n"
-                        f"Trend signal: {tech['signal']}"
-                    )
-    except Exception:
-        pass
+    return (
+        f"Technical summary for {sym}:\n"
+        f"Current: {tech['current']} | 20-day MA: {tech['ma20']} | 50-day MA: {tech['ma50']}\n"
+        f"RSI(14): {tech['rsi14']} (overbought >70, oversold <30)\n"
+        f"MACD: line {tech['macd_line']} vs signal {tech['macd_signal']} ({tech['macd_state']})\n"
+        f"ATR(14): {tech['atr14']} | Bollinger: {tech['bollinger']['upper']}/{tech['bollinger']['mid']}/{tech['bollinger']['lower']} ({tech['bollinger']['position']})\n"
+        f"Trend regime: {tech['trend']}"
+    )
 
-    # Fallback: Tencent kline (A-shares, HK)
-    try:
-        closes = _fetch_tencent_history(sym, days=60)
-        tech = _compute_technicals(closes)
-        if tech["ma20"]:
-            return (
-                f"Technical summary for {sym}:\n"
-                f"Current: {tech['current']} | 20-day MA: {tech['ma20']} | 50-day MA: {tech['ma50']}\n"
-                f"RSI(14): {tech['rsi14']} (overbought >70, oversold <30)\n"
-                f"Trend signal: {tech['signal']}"
-            )
-    except Exception:
-        pass
 
-    return f"Not enough price history to compute technicals for {sym}."
+@kg.tool
+def compute_signal(symbol: str) -> str:
+    """Compute a composite technical signal for a stock.
+
+    Deterministic vote-based regime classification — no ML:
+      - Trend vote:     price vs MA20 vs MA50 alignment
+      - Momentum vote:  RSI zone (55/45 thresholds)
+      - MACD vote:      line vs signal, fresh crosses prioritized
+
+    Signal = strong_bullish / bullish / neutral / bearish / strong_bearish.
+    Confidence = fraction of agreeing votes (1.0 = all three agree).
+
+    Also returns ATR-based key levels: support, resistance, stop-loss,
+    and two take-profit targets. Use this whenever giving short-term
+    trading advice — base stop-loss/take-profit levels on these numbers.
+    """
+    sym = resolve_symbol(symbol) or symbol.upper().strip()
+    bars = _get_history(sym)
+    if not bars:
+        return f"Not enough price history to compute a signal for {sym}."
+
+    tech = _compute_indicators(bars)
+    if not tech["ma20"] or not tech["atr14"]:
+        return f"Not enough price history to compute a signal for {sym}."
+
+    # ── Votes (deterministic, explainable) ────────────────────────────────
+    votes: list[tuple[str, int]] = []
+
+    trend_vote = 0
+    if tech["current"] > tech["ma20"] > tech["ma50"]:
+        trend_vote = 1
+    elif tech["current"] < tech["ma20"] < tech["ma50"]:
+        trend_vote = -1
+    votes.append(("trend", trend_vote))
+
+    rsi = tech["rsi14"]
+    momentum_vote = 1 if rsi > 55 else -1 if rsi < 45 else 0
+    votes.append(("momentum", momentum_vote))
+
+    macd_state = tech["macd_state"]
+    macd_vote = 1 if macd_state in ("bullish", "bullish_cross") else \
+                -1 if macd_state in ("bearish", "bearish_cross") else 0
+    votes.append(("macd", macd_vote))
+
+    total = sum(v for _, v in votes)
+    # "strong" requires all three votes aligned — two votes with a mixed
+    # third is just bullish/bearish
+    signal = (
+        "strong_bullish" if total == 3 else
+        "bullish" if total >= 1 else
+        "neutral" if total == 0 else
+        "bearish" if total <= -1 else
+        "strong_bearish"
+    )
+    confidence = round(abs(total) / len(votes), 2)
+
+    # ── Volatility regime (ATR relative to recent average) ────────────────
+    atrs = []
+    for i in range(1, len(bars)):
+        h, l, pc = bars[i]["high"], bars[i]["low"], bars[i - 1]["close"]
+        atrs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    avg_atr = sum(atrs[-30:]) / len(atrs[-30:]) if atrs else 0
+    atr_ratio = tech["atr14"] / avg_atr if avg_atr else 1.0
+    volatility = "high" if atr_ratio > 1.5 else "low" if atr_ratio < 0.7 else "normal"
+
+    # ── Key levels from recent price action + ATR ─────────────────────────
+    lows = [b["low"] for b in bars[-20:]]
+    highs = [b["high"] for b in bars[-20:]]
+    support = round(min(lows), 2)
+    resistance = round(max(highs), 2)
+    atr = tech["atr14"]
+
+    levels = {
+        "support": support,
+        "resistance": resistance,
+        "stop_loss": round(support - atr, 2),
+        "take_profit_1": round(tech["current"] + 2 * atr, 2),
+        "take_profit_2": round(resistance + atr, 2),
+    }
+
+    reasons = [name for name, v in votes if v != 0]
+    summary = (
+        f"{sym} composite signal: {signal} (confidence {confidence}). "
+        f"Trend {tech['trend']}, RSI {rsi} ({'bullish' if momentum_vote > 0 else 'bearish' if momentum_vote < 0 else 'neutral'}), "
+        f"MACD {macd_state}, volatility {volatility}. "
+        f"Votes from: {', '.join(reasons) or 'none — mixed signals'}."
+    )
+
+    return (
+        f"Signal: {signal}\n"
+        f"Confidence: {confidence} (agreement among trend/momentum/MACD votes)\n"
+        f"{summary}\n\n"
+        f"Indicators:\n"
+        f"- Current: {tech['current']} | MA20: {tech['ma20']} | MA50: {tech['ma50']}\n"
+        f"- RSI(14): {rsi}\n"
+        f"- MACD: line {tech['macd_line']} vs signal {tech['macd_signal']} ({macd_state})\n"
+        f"- ATR(14): {atr} | Volatility: {volatility}\n"
+        f"- Bollinger: {tech['bollinger']['upper']}/{tech['bollinger']['mid']}/{tech['bollinger']['lower']} ({tech['bollinger']['position']})\n\n"
+        f"Key levels (ATR-based):\n"
+        f"- Support: {levels['support']}\n"
+        f"- Resistance: {levels['resistance']}\n"
+        f"- Suggested stop-loss: {levels['stop_loss']}\n"
+        f"- Take-profit 1: {levels['take_profit_1']} | Take-profit 2: {levels['take_profit_2']}"
+    )

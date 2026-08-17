@@ -22,6 +22,7 @@ Usage:
 from kitegen.agent import Agent
 from kitegen.checkpoint import Checkpointer, MemorySaver, PostgresSaver
 from kitegen.deploy import to_worker
+from kitegen.memory import BufferMemory, Memory
 from kitegen.core import (
     Complete,
     Context,
@@ -115,6 +116,9 @@ __all__ = [
     "PostgresSaver",
     # Deployment
     "to_worker",
+    # Memory
+    "Memory",
+    "BufferMemory",
     # Legacy compatibility
     "ChatResponse",
     "chat",

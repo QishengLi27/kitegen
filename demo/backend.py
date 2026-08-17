@@ -30,7 +30,7 @@ import re
 from dataclasses import dataclass, field
 
 import kitegen as kg
-from demo.agents import pipeline, pipeline_saver
+from demo.agents import llm_tracker, pipeline, pipeline_saver
 from demo.portfolio import (
     Portfolio,
     Position,
@@ -86,6 +86,36 @@ async def _start_monitor():
     import asyncio as _asyncio
 
     _asyncio.create_task(start_monitor())
+    _asyncio.create_task(_autosave_usage())
+    try:
+        from demo.paper_engine import start_paper_trader
+        _asyncio.create_task(start_paper_trader())
+    except Exception:
+        logging.getLogger("kitegen").exception("[paper] failed to start paper trader")
+
+
+async def _autosave_usage() -> None:
+    """Persist LLM usage history every 60s (survives restarts)."""
+    import asyncio as _asyncio
+
+    from demo.agents import llm_tracker
+
+    while True:
+        try:
+            save_usage()  # sync — file write is fast, don't block the loop on it
+        except Exception:
+            logging.getLogger("kitegen").exception("[usage] autosave failed")
+        await _asyncio.sleep(60)
+
+
+def save_usage() -> None:
+    """Write the token tracker to data/usage.json."""
+    import json as _json
+
+    from demo.agents import llm_tracker
+
+    path = DATA_DIR / "usage.json"
+    _save_json(path, llm_tracker.to_dict())
 
 
 # ── Alerts endpoints ──────────────────────────────────────────────────────
@@ -114,6 +144,16 @@ async def ack_alert(alert_id: str):
             break
     _save_json(DATA_DIR / "alerts.json", alerts)
     return {"status": "ok"}
+
+
+@app.get("/usage")
+async def get_usage():
+    """Aggregate LLM token usage and cost across the whole pipeline."""
+    summary = llm_tracker.summary()
+    return {
+        **summary,
+        "calls": len(llm_tracker._records),
+    }
 
 
 @app.get("/briefing")
@@ -184,11 +224,18 @@ async def chat(request: Request):
             for h in recent
         )
 
+    # Force-refresh keywords bypass the research cache
+    force_research = any(k in msg.lower() for k in (
+        "重新研究", "重新分析", "深度分析", "deep dive", "force",
+    ))
+
     # Same thread_id per session is intentional — kitegen's checkpoint merge
     # semantics keep saved state as the base while the new keys win.
     state = {
         "user_message": msg + sym_hint,
         "history": history_text,
+        "symbol": sym,               # cache key for the research stage
+        "force_research": force_research,
         "_node_history": [],
     }
 
@@ -231,6 +278,12 @@ async def chat(request: Request):
             if collected:
                 session.history.append({"role": "assistant", "content": collected})
 
+            # Persist usage immediately — no waiting for the 60s autosave
+            try:
+                save_usage()
+            except Exception:
+                pass
+
             yield f"data: {json.dumps({'type': 'done', 'symbol': sym})}\n\n"
         except Exception as e:
             err = str(e)
@@ -260,14 +313,14 @@ async def health():
 @app.get("/portfolio")
 async def get_portfolio():
     """Return the current portfolio with live prices."""
+    from demo.monitor import _fetch_all  # parallel + per-symbol timeout
+
     portfolio = load_portfolio("default")
-    prices = {}
-    for symbol in portfolio.positions:
-        data = fetch_stock(symbol)
-        if data:
-            prices[symbol] = data["price"]
-        else:
-            prices[symbol] = 0.0
+    fetched = _fetch_all(list(portfolio.positions.keys()))
+    prices = {
+        symbol: (data["price"] if data else 0.0)
+        for symbol, data in fetched.items()
+    }
 
     pnls = portfolio.all_pnl(prices)
     return {
@@ -279,6 +332,8 @@ async def get_portfolio():
                 "shares": p.shares,
                 "cost_basis": p.cost_basis,
                 "current_price": prices.get(symbol, 0),
+                "stop_loss": p.stop_loss,
+                "take_profit": p.take_profit,
                 **pnls.get(symbol, {}),
             }
             for symbol, p in portfolio.positions.items()
@@ -293,6 +348,8 @@ async def add_position(request: Request):
     symbol = str(data.get("symbol", "")).upper().strip()
     shares = float(data.get("shares", 0))
     cost_basis = float(data.get("cost_basis", 0))
+    stop_loss = data.get("stop_loss")
+    take_profit = data.get("take_profit")
 
     if not symbol or shares <= 0 or cost_basis <= 0:
         return {"status": "error", "message": "Invalid position data"}
@@ -302,6 +359,8 @@ async def add_position(request: Request):
         symbol=symbol,
         shares=shares,
         cost_basis=cost_basis,
+        stop_loss=float(stop_loss) if stop_loss not in (None, "") else None,
+        take_profit=float(take_profit) if take_profit not in (None, "") else None,
     )
     save_portfolio(portfolio, "default")
     return {"status": "ok", "symbol": symbol}
@@ -314,6 +373,91 @@ async def remove_position(symbol: str):
     if symbol in portfolio.positions:
         del portfolio.positions[symbol]
         save_portfolio(portfolio, "default")
+    return {"status": "ok"}
+
+
+# ── Paper trading endpoints ────────────────────────────────────────────────
+
+
+@app.get("/paper")
+async def get_paper_account():
+    """Paper account summary: equity curve, positions, recent trades."""
+    from demo.paper import PaperAccount, load_config
+
+    account = PaperAccount.load()
+    return {
+        "cash": round(account.cash, 2),
+        "positions": [
+            {"symbol": p.symbol, "shares": p.shares,
+             "cost_basis": p.cost_basis, "buy_date": p.buy_date}
+            for p in account.positions.values()
+        ],
+        "snapshots": account.snapshots[-100:],
+        "trades": [t.__dict__ for t in account.trades[-50:]],
+        "config": load_config().__dict__,
+    }
+
+
+@app.post("/paper/tick")
+async def run_paper_tick(force: bool = False):
+    """Manually trigger one paper trading tick (also runs on the schedule).
+
+    With ?force=1, trading-hours restrictions are bypassed (for testing).
+    """
+    from demo.paper_engine import paper_tick
+
+    try:
+        summary = await paper_tick(force=force)
+        return summary
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/paper/config")
+async def update_paper_config(request: Request):
+    """Update the paper trading config. Takes effect next tick."""
+    from demo.paper import PaperConfig, load_config, save_config
+
+    data = await request.json()
+    current = load_config()
+    updated = PaperConfig(
+        initial_capital=float(data.get("initial_capital", current.initial_capital)),
+        check_interval_min=int(data.get("check_interval_min", current.check_interval_min)),
+        max_position_pct=float(data.get("max_position_pct", current.max_position_pct)),
+        stop_loss_pct=float(data.get("stop_loss_pct", current.stop_loss_pct)),
+        t_plus_1=bool(data.get("t_plus_1", current.t_plus_1)),
+        fee_rate=float(data.get("fee_rate", current.fee_rate)),
+        enabled_symbols=data.get("enabled_symbols", current.enabled_symbols),
+        trading_hours_only=bool(data.get("trading_hours_only", current.trading_hours_only)),
+    )
+
+    # Validate ranges — a bad config (interval=0, pct>1, negative capital)
+    # would busy-loop the worker or break the money math
+    errors = []
+    if updated.initial_capital <= 0:
+        errors.append("initial_capital must be positive")
+    if updated.check_interval_min < 1:
+        errors.append("check_interval_min must be >= 1")
+    if not (0 < updated.max_position_pct <= 1):
+        errors.append("max_position_pct must be in (0, 1]")
+    if not (0 < updated.stop_loss_pct <= 1):
+        errors.append("stop_loss_pct must be in (0, 1]")
+    if not (0 <= updated.fee_rate < 0.1):
+        errors.append("fee_rate must be in [0, 0.1)")
+    if errors:
+        return {"status": "error", "message": "; ".join(errors)}
+
+    save_config(updated)
+    return {"status": "ok", "config": updated.__dict__}
+
+
+@app.post("/paper/reset")
+async def reset_paper_account():
+    """Reset the paper account to the configured initial capital."""
+    from demo.paper import PaperAccount
+
+    account = PaperAccount.load()
+    account.reset()
     return {"status": "ok"}
 
 

@@ -169,6 +169,7 @@ async def paper_tick(force: bool = False) -> dict:
 
 async def _paper_tick_locked(force: bool = False) -> dict:
     config = load_config()
+    universe = get_universe(config)  # once — the gate and the tick share it
 
     if config.trading_hours_only and not force:
         in_session, why = is_trading_time()
@@ -180,19 +181,16 @@ async def _paper_tick_locked(force: bool = False) -> dict:
         # is open, but if no symbol in THIS universe is tradable right now
         # (e.g. an A-share-only universe during US hours), skip the whole
         # tick before spending any LLM calls.
-        universe = get_universe(config)
-        tradable_symbols = [
-            s for s in universe if is_symbol_tradable(s)[0]
-        ]
+        tradability = {s: is_symbol_tradable(s) for s in universe}
+        tradable_symbols = [s for s, (ok, _) in tradability.items() if ok]
         if universe and not tradable_symbols:
             closed = ", ".join(
-                f"{s} ({is_symbol_tradable(s)[1]})" for s in universe
+                f"{s} ({tradability[s][1]})" for s in universe
             )
             logger.info("[paper] tick skipped: all universe symbols closed — %s", closed)
             return {"status": "skipped", "reason": f"all symbols' markets closed: {closed}"}
 
     account = PaperAccount.load()
-    universe = get_universe(config)
 
     # 1. Fresh data: prices + signals (deterministic tools, no LLM)
     fetched = _fetch_all(universe)
@@ -393,14 +391,17 @@ async def start_paper_trader() -> None:
         # Log EVERY tick — a hold decision is a result, not silence
         if summary.get("executed"):
             logger.info("[paper] tick done — %d trade(s) executed", len(summary["executed"]))
+        elif summary.get("status") == "skipped":
+            logger.info("[paper] tick skipped: %s", summary.get("reason"))
+        elif summary.get("status") != "ok":
+            # parse_error / no_data / error — a malfunction, not a hold
+            logger.warning("[paper] tick failed: %s", summary)
         elif summary.get("blocked"):
             logger.info(
                 "[paper] tick done — no trades, %d blocked: %s",
                 len(summary["blocked"]),
                 "; ".join(f"{b['symbol']}: {b['reason']}" for b in summary["blocked"][:3]),
             )
-        elif summary.get("status") == "skipped":
-            logger.info("[paper] tick skipped: %s", summary.get("reason"))
         else:
             logger.info("[paper] tick done — no trades (agent held)")
 

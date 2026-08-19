@@ -21,8 +21,10 @@ CACHE_DIR = Path(__file__).parent / "data" / "cache"
 TTL_HOURS = float(os.getenv("RESEARCH_CACHE_TTL_HOURS", "4"))
 
 # The chat pipeline and the paper trader can generate research for the
-# same symbol concurrently — serialize file access and write atomically
-# so a torn write can never corrupt a cache entry.
+# same symbol concurrently. os.replace is the load-bearing fix (atomic
+# even across processes); the lock guards same-process threads. IMPORTANT:
+# the critical section is fully synchronous — never add an `await` inside
+# `with _lock:` or a blocking acquire would stall the event loop.
 _lock = threading.Lock()
 
 

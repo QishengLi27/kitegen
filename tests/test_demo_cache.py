@@ -42,3 +42,27 @@ async def test_cache_symbol_key_sanitized(monkeypatch, tmp_path):
 
     cache.cache_research("0700.HK", "Tencent report")
     assert (tmp_path / "research_0700_HK.json").exists()
+
+
+async def test_cache_concurrent_writers_never_corrupt(monkeypatch, tmp_path):
+    """Concurrent writers of the same symbol — the file must always parse."""
+    import threading
+
+    monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
+
+    errors = []
+
+    def writer(thread_id: int) -> None:
+        for i in range(25):
+            cache.cache_research("AAPL", f"report from thread {thread_id} #{i}")
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    cached = cache.get_cached_research("AAPL")
+    assert cached is not None
+    assert cached["report"].startswith("report from thread ")
+    assert cached["symbol"] == "AAPL"

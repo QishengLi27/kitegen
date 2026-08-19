@@ -30,7 +30,7 @@ logger = logging.getLogger("kitegen")
 async def to_worker(
     task: Callable[[], Awaitable[object]],
     *,
-    interval: float = 300.0,
+    interval: float | Callable[[], float] = 300.0,
     stop_event: asyncio.Event | None = None,
 ) -> None:
     """Run ``task()`` repeatedly every ``interval`` seconds until cancelled.
@@ -42,7 +42,9 @@ async def to_worker(
 
     Args:
         task: Async callable taking no arguments.
-        interval: Seconds between runs. Default 300 (5 min).
+        interval: Seconds between runs, or a zero-arg callable returning the
+            seconds. A callable is re-evaluated after every run — config
+            changes take effect without restarting the worker. Default 300.
         stop_event: Optional event; when set, the worker exits cleanly.
     """
     while True:
@@ -53,14 +55,22 @@ async def to_worker(
         except Exception:
             logger.exception("[kitegen] worker task failed — retrying at next tick")
 
+        try:
+            wait = interval() if callable(interval) else interval
+        except Exception:
+            # A config-driven interval callable that raises (corrupt config
+            # file, bad value) must not kill the worker silently
+            logger.exception("[kitegen] worker interval callable failed — using 300s fallback")
+            wait = 300.0
+
         if stop_event is not None:
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                await asyncio.wait_for(stop_event.wait(), timeout=wait)
                 return
             except asyncio.TimeoutError:
                 pass
         else:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(wait)
 
 
 __all__ = ["to_worker"]

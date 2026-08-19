@@ -176,6 +176,21 @@ async def _paper_tick_locked(force: bool = False) -> dict:
             logger.info("[paper] tick skipped: %s", why)
             return {"status": "skipped", "reason": why}
 
+        # Universe-aware gate: the global check passed because SOME market
+        # is open, but if no symbol in THIS universe is tradable right now
+        # (e.g. an A-share-only universe during US hours), skip the whole
+        # tick before spending any LLM calls.
+        universe = get_universe(config)
+        tradable_symbols = [
+            s for s in universe if is_symbol_tradable(s)[0]
+        ]
+        if universe and not tradable_symbols:
+            closed = ", ".join(
+                f"{s} ({is_symbol_tradable(s)[1]})" for s in universe
+            )
+            logger.info("[paper] tick skipped: all universe symbols closed — %s", closed)
+            return {"status": "skipped", "reason": f"all symbols' markets closed: {closed}"}
+
     account = PaperAccount.load()
     universe = get_universe(config)
 
@@ -367,15 +382,33 @@ def rebuild_trader_memory(limit: int = 6) -> None:
 
 
 async def start_paper_trader() -> None:
-    """Background worker: run a tick every check_interval_min minutes."""
+    """Background worker: run a tick every check_interval_min minutes.
+
+    The interval is re-read from config after every tick (callable interval
+    on to_worker) — changing check_interval_min in the UI takes effect
+    without restarting the server.
+    """
     async def _loop_tick() -> None:
-        config = load_config()
         summary = await paper_tick()
+        # Log EVERY tick — a hold decision is a result, not silence
         if summary.get("executed"):
-            logger.info("[paper] executed %d trade(s)", len(summary["executed"]))
+            logger.info("[paper] tick done — %d trade(s) executed", len(summary["executed"]))
+        elif summary.get("blocked"):
+            logger.info(
+                "[paper] tick done — no trades, %d blocked: %s",
+                len(summary["blocked"]),
+                "; ".join(f"{b['symbol']}: {b['reason']}" for b in summary["blocked"][:3]),
+            )
+        elif summary.get("status") == "skipped":
+            logger.info("[paper] tick skipped: %s", summary.get("reason"))
+        else:
+            logger.info("[paper] tick done — no trades (agent held)")
 
     config = load_config()
     rebuild_trader_memory()  # survive restarts: memory ← trades.json
     logger.info("[paper] paper trader starting — interval=%smin, capital=%s",
                 config.check_interval_min, config.initial_capital)
-    await kg.to_worker(_loop_tick, interval=config.check_interval_min * 60)
+    await kg.to_worker(
+        _loop_tick,
+        interval=lambda: load_config().check_interval_min * 60,
+    )

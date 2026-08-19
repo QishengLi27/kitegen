@@ -172,6 +172,42 @@ def test_market_closed_blocks_decision(isolated, monkeypatch):
     assert "000725.SZ" not in acct2.positions
 
 
+def test_universe_aware_hours_skip(isolated, monkeypatch):
+    """A-share-only universe outside CN hours → whole tick skipped, no LLM."""
+    acct = PaperAccount()
+    acct.cash = 100_000
+    acct.save()
+
+    from demo.paper import PaperConfig, save_config
+    save_config(PaperConfig(enabled_symbols=["000725.SZ"]))
+
+    # Global gate passes (some market open), but the symbol's market is closed
+    monkeypatch.setattr(
+        "demo.paper_engine.is_trading_time",
+        lambda now=None: (True, ""),
+    )
+    monkeypatch.setattr(
+        "demo.paper_engine.is_symbol_tradable",
+        lambda symbol, now=None: (False, "CN market closed (22:00)"),
+    )
+
+    # Any LLM/network activity must NOT happen — count calls
+    fetch_calls = []
+
+    def fake_fetch(symbols, timeout=15.0):
+        fetch_calls.append(list(symbols))
+        return {s: {"price": 6.08, "chg": 0.0} for s in symbols}
+
+    monkeypatch.setattr("demo.paper_engine._fetch_all", fake_fetch)
+
+    from demo.paper_engine import paper_tick
+    summary = asyncio.run(paper_tick(force=False))
+
+    assert summary["status"] == "skipped"
+    assert "markets closed" in summary["reason"]
+    assert fetch_calls == []  # no quotes fetched, no LLM, no research
+
+
 def test_tick_lock_serializes_concurrent_ticks(isolated, monkeypatch):
     """Manual + worker ticks overlap — the lock must serialize them."""
     import demo.paper_engine as engine

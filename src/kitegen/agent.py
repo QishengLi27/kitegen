@@ -112,6 +112,13 @@ class Agent(Runnable):
         """
         if context is None:
             context = Context()
+            # When running as a Graph node, wire the agent's internal tool-call
+            # events into the graph's event stream so callers can observe live
+            # progress (e.g. SSE progress events in a web UI).
+            from kitegen.graph import _stream_queue
+            queue = _stream_queue.get()
+            if queue is not None:
+                context._stream_queue = queue
         node_name = context.node_name or self.role
 
         user_text = self._build_user_message(state)

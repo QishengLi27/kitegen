@@ -3,12 +3,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
 
-const API = "http://localhost:8000/chat";
-const RESET = "http://localhost:8000/reset";
-const PORTFOLIO = "http://localhost:8000/portfolio";
-const ALERTS = "http://localhost:8000/alerts";
-const USAGE = "http://localhost:8000/usage";
-const PAPER = "http://localhost:8000/paper";
+const API = "/chat";
+const RESET = "/reset";
+const PORTFOLIO = "/portfolio";
+const ALERTS = "/alerts";
+const USAGE = "/usage";
+const PAPER = "/paper";
 
 function Markdown({ text, streaming = false }) {
   return (
@@ -48,6 +48,7 @@ export default function App() {
   const [briefingLoading, setBriefingLoading] = useState(false);
   const [expandedBriefing, setExpandedBriefing] = useState(null);  // id of the expanded briefing
   const [threadId] = useState(() => "chat-" + Math.random().toString(36).slice(2, 8));
+  const [riskMode, setRiskMode] = useState("normal"); // conservative | normal | aggressive
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
   const abortRef = useRef(null);
@@ -297,7 +298,7 @@ export default function App() {
       const resp = await fetch(API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: msg, thread_id: threadId }),
+        body: JSON.stringify({ message: msg, thread_id: threadId, risk_mode: riskMode }),
         signal: controller.signal,
       });
 
@@ -316,7 +317,11 @@ export default function App() {
           setStages([...finalStages]);
         } else if (data.type === "stage_done") {
           finalStages = finalStages.map(s =>
-            s.stage === data.stage ? { ...s, done: true } : s);
+            s.stage === data.stage ? { ...s, done: true, progress: null } : s);
+          setStages([...finalStages]);
+        } else if (data.type === "progress") {
+          finalStages = finalStages.map(s =>
+            s.stage === data.stage ? { ...s, progress: data.detail } : s);
           setStages([...finalStages]);
         } else if (data.type === "token") {
           finalAdvice += data.content;
@@ -388,7 +393,7 @@ export default function App() {
       abortRef.current = null;
       readerRef.current = null;
     }
-  }, [input, loading, threadId]);
+  }, [input, loading, threadId, riskMode]);
 
   const askPosition = useCallback((pos) => {
     send(`Analyze my position in ${pos.symbol} with current price levels`);
@@ -663,6 +668,30 @@ export default function App() {
               <div className="paper-config">
                 <div className="pos-form-title">Config</div>
                 <div className="pos-form-row">
+                  <label>Risk mode
+                    <select
+                      className="risk-select"
+                      value={paperConfig.risk_mode || "normal"}
+                      onChange={e => {
+                        // Mode change adopts the mode's recommended caps
+                        // (percent form) unless the user then edits them.
+                      const presets = {
+                          conservative: { max_position_pct: 20, stop_loss_pct: 10 },
+                          normal: { max_position_pct: 50, stop_loss_pct: 20 },
+                          aggressive: { max_position_pct: 80, stop_loss_pct: 50 },
+                        };
+                        setPaperConfig({
+                          ...paperConfig,
+                          risk_mode: e.target.value,
+                          ...presets[e.target.value],
+                        });
+                      }}
+                    >
+                      <option value="conservative">🛡 Conservative</option>
+                      <option value="normal">⚖ Normal</option>
+                      <option value="aggressive">🚀 Aggressive</option>
+                    </select>
+                  </label>
                   <label>Capital
                     <input type="number" value={paperConfig.initial_capital}
                       onChange={e => setPaperConfig({ ...paperConfig, initial_capital: parseFloat(e.target.value) })} />
@@ -831,6 +860,17 @@ export default function App() {
           disabled={loading}
           autoFocus
         />
+        <select
+          className="risk-select"
+          value={riskMode}
+          onChange={(e) => setRiskMode(e.target.value)}
+          disabled={loading}
+          title="Risk mode for the advice"
+        >
+          <option value="conservative">🛡 Conservative</option>
+          <option value="normal">⚖ Normal</option>
+          <option value="aggressive">🚀 Aggressive</option>
+        </select>
         {loading ? (
           <button className="stop-btn" onClick={stop}>⏹ Stop</button>
         ) : (
@@ -949,6 +989,9 @@ function StageItem({ stage: s, index: i }) {
         )}
         {!s.done && <span className="stage-spinner" />}
       </div>
+      {!s.done && s.progress && (
+        <div className="stage-progress">{s.progress}</div>
+      )}
       {s.content && open && <Markdown text={s.content} />}
     </div>
   );

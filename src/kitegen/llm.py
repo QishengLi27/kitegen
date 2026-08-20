@@ -157,6 +157,8 @@ class OpenAIAdapter(LLMAdapter):
         model: str | None = None,
         client: Any | None = None,
         tracker: Any | None = None,
+        temperature: float | None = None,
+        timeout: float | None = None,
     ):
         if model is None:
             import os
@@ -173,6 +175,21 @@ class OpenAIAdapter(LLMAdapter):
         # resilience imports Usage from this module). Every chat() call
         # records its usage into it.
         self.tracker = tracker
+        # Temperature can be pinned per-model via LLM_TEMPERATURE. Some
+        # providers (e.g. Kimi k3-256k) only accept temperature=1.
+        if temperature is None:
+            import os
+            env_temp = os.getenv("LLM_TEMPERATURE")
+            temperature = float(env_temp) if env_temp is not None else 0.0
+        self.temperature = temperature
+        # Timeout for the underlying HTTP client. Slow providers (e.g. Kimi
+        # k3-256k) can easily exceed 30 s on multi-stock analysis, so the
+        # default is deliberately generous.
+        if timeout is None:
+            import os
+            env_timeout = os.getenv("LLM_TIMEOUT")
+            timeout = float(env_timeout) if env_timeout is not None else 120.0
+        self.timeout = timeout
 
     def _ensure_client(self):
         if self._client is not None:
@@ -188,7 +205,7 @@ class OpenAIAdapter(LLMAdapter):
         self._client = AsyncOpenAI(
             api_key=key,
             base_url=base,
-            timeout=30.0,
+            timeout=self.timeout,
         )
 
     async def chat(
@@ -196,7 +213,7 @@ class OpenAIAdapter(LLMAdapter):
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        temperature: float | None = 0.0,
+        temperature: float | None = None,
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
@@ -205,7 +222,7 @@ class OpenAIAdapter(LLMAdapter):
         request: dict[str, Any] = {
             "model": model_name,
             "messages": [m.to_openai() for m in messages],
-            "temperature": temperature,
+            "temperature": temperature if temperature is not None else self.temperature,
         }
         if max_tokens is not None:
             request["max_tokens"] = max_tokens

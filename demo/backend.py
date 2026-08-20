@@ -28,9 +28,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 import kitegen as kg
-from demo.agents import llm_tracker, pipeline, pipeline_saver
+from demo.agents import get_pipeline, llm_tracker
 from demo.portfolio import (
     Portfolio,
     Position,
@@ -38,11 +39,10 @@ from demo.portfolio import (
     load_portfolio,
     save_portfolio,
 )
-from demo.tools import fetch_stock, resolve_symbol
+from demo.tools import fetch_stock, resolve_symbol, set_risk_mode
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
 
 # Market monitoring
 from demo.monitor import _save_json, load_alerts, start_monitor, DATA_DIR
@@ -198,6 +198,13 @@ async def chat(request: Request):
     msg = str(data.get("message", "")).strip()
     tid = data.get("thread_id", "default")
 
+    # Pick the mode-specific pipeline. The request's risk_mode drives both
+    # the agents' goals/personalities (baked into the pipeline) and the
+    # tool thresholds (set per request via set_risk_mode in the stream).
+    mode = str(data.get("risk_mode", "normal")).lower().strip()
+    mode = mode if mode in ("conservative", "normal", "aggressive") else "normal"
+    pipeline, pipeline_saver = get_pipeline(mode)
+
     if not msg:
         async def empty():
             yield f"data: {json.dumps({'type': 'error', 'message': 'Empty message'})}\n\n"
@@ -239,60 +246,112 @@ async def chat(request: Request):
         "_node_history": [],
     }
 
-    STAGE_LABELS = {
+    stage_labels = {
         "research": "🔎 Step 1 · Research",
         "strategy": "🎯 Step 2 · Strategy",
         "advice": "💼 Step 3 · Advice",
     }
 
-    async def event_stream():
-        collected = ""
+    return StreamingResponse(
+        _chat_event_stream(
+            pipeline=pipeline,
+            pipeline_saver=pipeline_saver,
+            state=state,
+            thread_id=tid,
+            session=session,
+            message=msg,
+            symbol=sym,
+            stage_labels=stage_labels,
+            risk_mode=mode,
+        ),
+        media_type="text/event-stream",
+    )
+
+
+async def _chat_event_stream(
+    pipeline: Any,
+    pipeline_saver: Any,
+    state: dict,
+    thread_id: str,
+    session: Session,
+    message: str,
+    symbol: str | None,
+    stage_labels: dict[str, str],
+    risk_mode: str = "normal",
+):
+    """Async generator that yields SSE events for the /chat endpoint.
+
+    Forwards graph lifecycle events plus tool-call progress so the UI stays
+    responsive during long LLM/tool round trips.
+    """
+    # Agent roles emitted by ToolCallEvent/ToolResultEvent do not match the
+    # graph node names used by NodeStart/NodeEnd. Map them back so progress
+    # updates attach to the correct stage in the UI.
+    role_to_stage = {
+        "stock researcher": "research",
+        "trading strategist": "strategy",
+        "personal portfolio analyst": "advice",
+    }
+
+    # Tools derive their thresholds from the risk-mode context var. Set it
+    # in this request's task so every agent/tool call in the pipeline sees
+    # the mode the user picked (contextvars are task-local, so this never
+    # leaks into other requests).
+    set_risk_mode(risk_mode)
+
+    collected = ""
+    try:
+        async for event in pipeline.invoke_stream(state, thread_id=thread_id):
+            match event:
+                case kg.NodeStart(node=n):
+                    label = stage_labels.get(n, n)
+                    yield f"data: {json.dumps({'type': 'stage_started', 'stage': n, 'label': label})}\n\n"
+                case kg.NodeEnd(node=n):
+                    yield f"data: {json.dumps({'type': 'stage_done', 'stage': n})}\n\n"
+                case kg.ToolCallEvent(node=n, tool=t, arguments=_):
+                    # Stream live progress so the UI does not feel frozen
+                    # during long tool-call round trips.
+                    stage = role_to_stage.get(n, n)
+                    yield f"data: {json.dumps({'type': 'progress', 'stage': stage, 'status': 'calling', 'tool': t, 'detail': f'Calling {t}...'})}\n\n"
+                case kg.ToolResultEvent(node=n, tool=t, result=_):
+                    stage = role_to_stage.get(n, n)
+                    yield f"data: {json.dumps({'type': 'progress', 'stage': stage, 'status': 'done', 'tool': t, 'detail': f'{t} returned'})}\n\n"
+                case kg.Custom(data=d):
+                    if isinstance(d, dict) and d.get("type") == "stage":
+                        yield f"data: {json.dumps({'type': 'stage_output', 'stage': d['stage'], 'content': d['content']})}\n\n"
+                case kg.NodeError(node=n, error=e):
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'{n}: {e}'})}\n\n"
+                case kg.Complete():
+                    pass
+
+        # Load final state and stream the advice as tokens
+        final_state = await pipeline_saver.load(thread_id)
+        if final_state and final_state.get("output"):
+            collected = final_state["output"]
+            # Split preserving newlines/spaces — the advice is markdown and
+            # the frontend renders it; naive word-splitting would destroy
+            # heading/table syntax.
+            for piece in re.split(r"(\s+)", collected):
+                if piece:
+                    yield f"data: {json.dumps({'type': 'token', 'content': piece})}\n\n"
+
+        session.history.append({"role": "user", "content": message})
+        if collected:
+            session.history.append({"role": "assistant", "content": collected})
+
+        # Persist usage immediately — no waiting for the 60s autosave
         try:
-            async for event in pipeline.invoke_stream(state, thread_id=tid):
-                match event:
-                    case kg.NodeStart(node=n):
-                        label = STAGE_LABELS.get(n, n)
-                        yield f"data: {json.dumps({'type': 'stage_started', 'stage': n, 'label': label})}\n\n"
-                    case kg.NodeEnd(node=n):
-                        yield f"data: {json.dumps({'type': 'stage_done', 'stage': n})}\n\n"
-                    case kg.Custom(data=d):
-                        if isinstance(d, dict) and d.get("type") == "stage":
-                            yield f"data: {json.dumps({'type': 'stage_output', 'stage': d['stage'], 'content': d['content']})}\n\n"
-                    case kg.NodeError(node=n, error=e):
-                        yield f"data: {json.dumps({'type': 'error', 'message': f'{n}: {e}'})}\n\n"
-                    case kg.Complete():
-                        pass
+            save_usage()
+        except Exception:
+            pass
 
-            # Load final state and stream the advice as tokens
-            final_state = await pipeline_saver.load(tid)
-            if final_state and final_state.get("output"):
-                collected = final_state["output"]
-                # Split preserving newlines/spaces — the advice is markdown and
-                # the frontend renders it; naive word-splitting would destroy
-                # heading/table syntax.
-                for piece in re.split(r"(\s+)", collected):
-                    if piece:
-                        yield f"data: {json.dumps({'type': 'token', 'content': piece})}\n\n"
-
-            session.history.append({"role": "user", "content": msg})
-            if collected:
-                session.history.append({"role": "assistant", "content": collected})
-
-            # Persist usage immediately — no waiting for the 60s autosave
-            try:
-                save_usage()
-            except Exception:
-                pass
-
-            yield f"data: {json.dumps({'type': 'done', 'symbol': sym})}\n\n"
-        except Exception as e:
-            err = str(e)
-            # Friendly message for missing API key
-            if "api_key" in err.lower() or "credentials" in err.lower():
-                err = "No LLM API key configured. Set OPENAI_API_KEY or LLM_API_KEY environment variable."
-            yield f"data: {json.dumps({'type': 'error', 'message': err})}\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+        yield f"data: {json.dumps({'type': 'done', 'symbol': symbol})}\n\n"
+    except Exception as e:
+        err = str(e)
+        # Friendly message for missing API key
+        if "api_key" in err.lower() or "credentials" in err.lower():
+            err = "No LLM API key configured. Set OPENAI_API_KEY or LLM_API_KEY environment variable."
+        yield f"data: {json.dumps({'type': 'error', 'message': err})}\n\n"
 
 
 @app.post("/reset")
@@ -415,21 +474,20 @@ async def run_paper_tick(force: bool = False):
 
 @app.post("/paper/config")
 async def update_paper_config(request: Request):
-    """Update the paper trading config. Takes effect next tick."""
-    from demo.paper import PaperConfig, load_config, save_config
+    """Update the paper trading config. Takes effect next tick.
+
+    risk_mode may be sent alone; when it changes, the derived rule params
+    (max_position_pct, stop_loss_pct) adopt the mode's recommended profile
+    unless the request provides them explicitly.
+    """
+    from demo.paper import load_config, save_config, update_config_from_dict
 
     data = await request.json()
     current = load_config()
-    updated = PaperConfig(
-        initial_capital=float(data.get("initial_capital", current.initial_capital)),
-        check_interval_min=int(data.get("check_interval_min", current.check_interval_min)),
-        max_position_pct=float(data.get("max_position_pct", current.max_position_pct)),
-        stop_loss_pct=float(data.get("stop_loss_pct", current.stop_loss_pct)),
-        t_plus_1=bool(data.get("t_plus_1", current.t_plus_1)),
-        fee_rate=float(data.get("fee_rate", current.fee_rate)),
-        enabled_symbols=data.get("enabled_symbols", current.enabled_symbols),
-        trading_hours_only=bool(data.get("trading_hours_only", current.trading_hours_only)),
-    )
+    try:
+        updated = update_config_from_dict(current, data)
+    except (ValueError, TypeError) as e:
+        return {"status": "error", "message": str(e)}
 
     # Validate ranges — a bad config (interval=0, pct>1, negative capital)
     # would busy-loop the worker or break the money math
@@ -461,8 +519,12 @@ async def reset_paper_account():
     return {"status": "ok"}
 
 
-# ── Static files ──────────────────────────────────────────────────────────
-
-static_dir = _os.path.join(_os.path.dirname(__file__), "static")
-if _os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir, html=True), name="static")
+# Static files are served by Nginx via docker-compose; the backend no longer
+# mounts /static. Keep this section empty so the commented block below stays
+# available for local development without the StaticFiles import.
+# To re-enable backend static serving, add back:
+#   from fastapi.staticfiles import StaticFiles
+# and uncomment the following lines.
+# static_dir = _os.path.join(_os.path.dirname(__file__), "static")
+# if _os.path.isdir(static_dir):
+#     app.mount("/static", StaticFiles(directory=static_dir, html=True), name="static")

@@ -31,6 +31,18 @@ def _fake_client(tokens):
     return client
 
 
+def test_openai_adapter_timeout_defaults_to_120_and_is_configurable(monkeypatch):
+    """Timeout defaults to 120 s, accepts constructor arg and LLM_TIMEOUT env var."""
+    assert kg.OpenAIAdapter(model="gpt-4o", client=_fake_client((1, 1))).timeout == 120.0
+    assert kg.OpenAIAdapter(model="gpt-4o", client=_fake_client((1, 1)), timeout=60.0).timeout == 60.0
+
+    monkeypatch.setenv("LLM_TIMEOUT", "45")
+    assert kg.OpenAIAdapter(model="gpt-4o", client=_fake_client((1, 1))).timeout == 45.0
+
+    # Constructor arg wins over env var
+    assert kg.OpenAIAdapter(model="gpt-4o", client=_fake_client((1, 1)), timeout=90.0).timeout == 90.0
+
+
 async def test_openai_adapter_records_usage_to_tracker():
     """chat() records usage into the adapter's TokenTracker."""
     tracker = kg.TokenTracker()

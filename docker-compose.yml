@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  kitegen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kitegen-demo
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      # Required: injected from server environment variables or .env file
+      - LLM_API_KEY=${LLM_API_KEY:?Please set LLM_API_KEY in .env}
+      - LLM_API_BASE=${LLM_API_BASE:-https://api.deepseek.com/v1}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-v4-flash}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.0}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-120}
+      # Optional
+      - RISK_MODE=${RISK_MODE:-normal}
+      - MONITOR_INTERVAL=${MONITOR_INTERVAL:-300}
+      - MONITOR_MOVE_THRESHOLD=${MONITOR_MOVE_THRESHOLD:-5}
+      - MONITOR_BRIEFING_TIME=${MONITOR_BRIEFING_TIME:-08:50}
+      - WEBHOOK_URL=${WEBHOOK_URL:-}
+    volumes:
+      # Persist positions, alerts, trade history, usage stats, paper account/config
+      - ./demo/data:/app/demo/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Nginx as the unified entrypoint: API routes proxy to backend, everything
+  # else serves the frontend static SPA.
+  nginx:
+    image: nginx:alpine
+    container_name: kitegen-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # - "443:443"  # uncomment when HTTPS is enabled
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./demo/frontend/dist:/usr/share/nginx/html:ro  # frontend build output
+      # - ./cert:/etc/nginx/cert:ro  # uncomment when HTTPS is enabled
+    depends_on:
+      - kitegen

@@ -6,10 +6,69 @@ free endpoints.
 
 from __future__ import annotations
 
+import contextvars
+import os
 import re
 from typing import Any
 
 import requests
+
+
+# ── Risk mode context ────────────────────────────────────────────────────────
+#
+# The backend/chat layer sets the active risk mode per request via set_risk_mode().
+# Tool defaults (position sizing, signal thresholds) then derive from the active
+# profile so LLM agents do not need to hard-code numeric values.
+
+RISK_MODES = {"conservative", "normal", "aggressive"}
+
+RISK_PROFILES = {
+    "conservative": {
+        "risk_pct": 0.5,      # % of equity risked per trade
+        "rsi_bull": 60,       # need stronger momentum to vote bullish
+        "rsi_bear": 40,
+        "atr_stop_mult": 1.0,
+        "atr_tp_mult": 1.5,
+    },
+    "normal": {
+        "risk_pct": 1.0,
+        "rsi_bull": 55,
+        "rsi_bear": 45,
+        "atr_stop_mult": 1.0,
+        "atr_tp_mult": 2.0,
+    },
+    "aggressive": {
+        "risk_pct": 2.0,      # larger position for bigger returns / faster recovery
+        "rsi_bull": 50,       # easier to trigger a bullish vote
+        "rsi_bear": 50,
+        "atr_stop_mult": 1.5, # wider stop to ride volatility
+        "atr_tp_mult": 3.0,   # farther target for bigger payoff
+    },
+}
+
+_RISK_MODE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "risk_mode", default=os.getenv("RISK_MODE", "normal").lower().strip()
+)
+
+
+def get_risk_mode() -> str:
+    """Return the active risk mode for the current execution context."""
+    mode = _RISK_MODE_VAR.get()
+    return mode if mode in RISK_MODES else "normal"
+
+
+def set_risk_mode(mode: str) -> None:
+    """Set the active risk mode for the current execution context."""
+    mode = mode.lower().strip()
+    if mode not in RISK_MODES:
+        raise ValueError(f"Invalid risk_mode '{mode}'. Must be one of: {sorted(RISK_MODES)}")
+    _RISK_MODE_VAR.set(mode)
+
+
+def risk_profile(mode: str | None = None) -> dict[str, float]:
+    """Return the numeric profile for a risk mode (active mode by default)."""
+    mode = (mode or get_risk_mode()).lower().strip()
+    return dict(RISK_PROFILES.get(mode, RISK_PROFILES["normal"]))
 
 
 def _to_tencent_code(symbol: str) -> str | None:
@@ -424,7 +483,7 @@ def calculate_position_size(
     symbol: str,
     entry: float,
     stop: float,
-    risk_pct: float = 1.0,
+    risk_pct: float | None = None,
 ) -> str:
     """Calculate how many shares to add for a new position or add-on.
 
@@ -435,13 +494,17 @@ def calculate_position_size(
         symbol: Stock symbol.
         entry: Planned entry price.
         stop: Stop-loss price (must be below entry for a long position).
-        risk_pct: Percent of portfolio equity to risk on this trade (default 1%).
+        risk_pct: Percent of portfolio equity to risk on this trade.
+            Defaults to the active risk-mode profile (0.5% / 1.0% / 2.0%).
     """
     from demo.portfolio import load_portfolio
     from demo.tools import fetch_stock
 
     if entry <= stop:
         return "Invalid plan: stop must be below entry price for a long position."
+
+    if risk_pct is None:
+        risk_pct = risk_profile()["risk_pct"]
 
     portfolio = load_portfolio("default")
     prices: dict[str, float] = {}
@@ -672,12 +735,12 @@ def get_technical_summary(symbol: str) -> str:
 
 
 @kg.tool
-def compute_signal(symbol: str) -> str:
+def compute_signal(symbol: str, risk_mode: str | None = None) -> str:
     """Compute a composite technical signal for a stock.
 
     Deterministic vote-based regime classification — no ML:
       - Trend vote:     price vs MA20 vs MA50 alignment
-      - Momentum vote:  RSI zone (55/45 thresholds)
+      - Momentum vote:  RSI zone (thresholds depend on risk mode)
       - MACD vote:      line vs signal, fresh crosses prioritized
 
     Signal = strong_bullish / bullish / neutral / bearish / strong_bearish.
@@ -686,6 +749,10 @@ def compute_signal(symbol: str) -> str:
     Also returns ATR-based key levels: support, resistance, stop-loss,
     and two take-profit targets. Use this whenever giving short-term
     trading advice — base stop-loss/take-profit levels on these numbers.
+
+    Args:
+        risk_mode: conservative | normal | aggressive. Defaults to the
+            active risk-mode context, then the RISK_MODE env var.
     """
     sym = resolve_symbol(symbol) or symbol.upper().strip()
     bars = _get_history(sym)
@@ -695,6 +762,12 @@ def compute_signal(symbol: str) -> str:
     tech = _compute_indicators(bars)
     if not tech["ma20"] or not tech["atr14"]:
         return f"Not enough price history to compute a signal for {sym}."
+
+    profile = risk_profile(risk_mode)
+    rsi_bull = profile["rsi_bull"]
+    rsi_bear = profile["rsi_bear"]
+    atr_stop_mult = profile["atr_stop_mult"]
+    atr_tp_mult = profile["atr_tp_mult"]
 
     # ── Votes (deterministic, explainable) ────────────────────────────────
     votes: list[tuple[str, int]] = []
@@ -707,7 +780,7 @@ def compute_signal(symbol: str) -> str:
     votes.append(("trend", trend_vote))
 
     rsi = tech["rsi14"]
-    momentum_vote = 1 if rsi > 55 else -1 if rsi < 45 else 0
+    momentum_vote = 1 if rsi > rsi_bull else -1 if rsi < rsi_bear else 0
     votes.append(("momentum", momentum_vote))
 
     macd_state = tech["macd_state"]
@@ -746,9 +819,9 @@ def compute_signal(symbol: str) -> str:
     levels = {
         "support": support,
         "resistance": resistance,
-        "stop_loss": round(support - atr, 2),
-        "take_profit_1": round(tech["current"] + 2 * atr, 2),
-        "take_profit_2": round(resistance + atr, 2),
+        "stop_loss": round(support - atr_stop_mult * atr, 2),
+        "take_profit_1": round(tech["current"] + atr_tp_mult * atr, 2),
+        "take_profit_2": round(resistance + atr_tp_mult * atr, 2),
     }
 
     reasons = [name for name, v in votes if v != 0]

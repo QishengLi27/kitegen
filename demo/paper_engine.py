@@ -20,7 +20,7 @@ from datetime import date
 from typing import Any
 
 import kitegen as kg
-from demo.agents import _get_llm, market_researcher
+from demo.agents import RISK_MODE_INSTRUCTIONS, _get_llm, market_researcher
 from demo.cache import cache_research, get_cached_research
 from demo.monitor import _fetch_all
 from demo.paper import (
@@ -31,7 +31,7 @@ from demo.paper import (
     is_trading_time,
     load_config,
 )
-from demo.tools import compute_signal
+from demo.tools import compute_signal, set_risk_mode
 
 try:
     from pydantic import BaseModel, Field
@@ -169,6 +169,9 @@ async def paper_tick(force: bool = False) -> dict:
 
 async def _paper_tick_locked(force: bool = False) -> dict:
     config = load_config()
+    # The configured risk mode drives both the deterministic tools
+    # (compute_signal thresholds) and the decision prompt this tick.
+    set_risk_mode(config.risk_mode)
     universe = get_universe(config)  # once — the gate and the tick share it
 
     if config.trading_hours_only and not force:
@@ -225,6 +228,8 @@ async def _paper_tick_locked(force: bool = False) -> dict:
         f"- Cash: {account.cash:.2f}\n"
         f"- Equity: {equity:.2f}\n"
         f"- Positions:\n{positions_text}\n\n"
+        f"Trading style for this tick: "
+        f"{RISK_MODE_INSTRUCTIONS.get(config.risk_mode, RISK_MODE_INSTRUCTIONS['normal'])}\n\n"
         f"Signals and research for this tick:\n"
         + "\n\n".join(
             f"{s}:\n{signals[s]}\nResearch: {reports[s]}"

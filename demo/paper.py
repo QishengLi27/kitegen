@@ -27,6 +27,23 @@ DATA_DIR = Path(__file__).parent / "data" / "paper"
 # ── Config ───────────────────────────────────────────────────────────────────
 
 
+RISK_MODES = {"conservative", "normal", "aggressive"}
+
+# Default paper-trading rule parameters per risk mode. These are used when a
+# config update changes the risk_mode but does not explicitly provide the
+# derived fields.
+PAPER_RISK_PROFILES = {
+    "conservative": {"max_position_pct": 0.20, "stop_loss_pct": 0.1},
+    "normal": {"max_position_pct": 0.50, "stop_loss_pct": 0.2},
+    "aggressive": {"max_position_pct": 0.80, "stop_loss_pct": 0.5},
+}
+
+
+def paper_defaults_for_mode(risk_mode: str) -> dict[str, float]:
+    """Return recommended default paper-trading parameters for a risk mode."""
+    return dict(PAPER_RISK_PROFILES.get(risk_mode, PAPER_RISK_PROFILES["normal"]))
+
+
 @dataclass
 class PaperConfig:
     initial_capital: float = 500_000
@@ -37,6 +54,13 @@ class PaperConfig:
     fee_rate: float = 0.0003            # commission both ways
     enabled_symbols: list[str] | None = None  # None = real portfolio universe
     trading_hours_only: bool = True     # skip ticks outside trading hours
+    risk_mode: str = "normal"           # conservative | normal | aggressive
+
+    def __post_init__(self):
+        mode = str(self.risk_mode).lower().strip()
+        if mode not in RISK_MODES:
+            raise ValueError(f"Invalid risk_mode '{self.risk_mode}'. Must be one of: {RISK_MODES}")
+        self.risk_mode = mode
 
 
 # Trading sessions in LOCAL time (assumes Beijing time):
@@ -146,6 +170,8 @@ def _save_json(path: Path, data: Any) -> None:
 
 def load_config() -> PaperConfig:
     data = _load_json(DATA_DIR / "config.json", {})
+    env_mode = os.getenv("RISK_MODE", "normal").lower().strip()
+    mode = str(data.get("risk_mode", env_mode))
     return PaperConfig(
         initial_capital=float(data.get("initial_capital", 500_000)),
         check_interval_min=int(data.get("check_interval_min", 30)),
@@ -155,11 +181,46 @@ def load_config() -> PaperConfig:
         fee_rate=float(data.get("fee_rate", 0.0003)),
         enabled_symbols=data.get("enabled_symbols"),
         trading_hours_only=bool(data.get("trading_hours_only", True)),
+        risk_mode=mode if mode in RISK_MODES else "normal",
     )
 
 
 def save_config(config: PaperConfig) -> None:
     _save_json(DATA_DIR / "config.json", asdict(config))
+
+
+def update_config_from_dict(current: PaperConfig, data: dict) -> PaperConfig:
+    """Build an updated config from a partial dict (e.g. an API request body).
+
+    risk_mode may be sent alone — when it changes and the derived rule
+    parameters (max_position_pct, stop_loss_pct) are not explicitly
+    provided, they adopt the mode's recommended profile.
+    """
+    requested_mode = str(data.get("risk_mode", current.risk_mode)).lower().strip()
+    if requested_mode not in RISK_MODES:
+        raise ValueError(
+            f"risk_mode must be one of: {', '.join(sorted(RISK_MODES))}"
+        )
+    mode_changed = requested_mode != current.risk_mode
+    profile_defaults = paper_defaults_for_mode(requested_mode)
+
+    return PaperConfig(
+        initial_capital=float(data.get("initial_capital", current.initial_capital)),
+        check_interval_min=int(data.get("check_interval_min", current.check_interval_min)),
+        max_position_pct=float(data.get(
+            "max_position_pct",
+            profile_defaults["max_position_pct"] if mode_changed else current.max_position_pct,
+        )),
+        stop_loss_pct=float(data.get(
+            "stop_loss_pct",
+            profile_defaults["stop_loss_pct"] if mode_changed else current.stop_loss_pct,
+        )),
+        t_plus_1=bool(data.get("t_plus_1", current.t_plus_1)),
+        fee_rate=float(data.get("fee_rate", current.fee_rate)),
+        enabled_symbols=data.get("enabled_symbols", current.enabled_symbols),
+        trading_hours_only=bool(data.get("trading_hours_only", current.trading_hours_only)),
+        risk_mode=requested_mode,
+    )
 
 
 # ── Account persistence ──────────────────────────────────────────────────────

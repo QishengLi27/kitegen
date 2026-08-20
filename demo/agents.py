@@ -11,6 +11,8 @@ Every strategy prompt requires BIDIRECTIONAL trade plans:
 
 from __future__ import annotations
 
+import os
+
 import kitegen as kg
 from demo.portfolio import Position, Portfolio, load_portfolio
 from demo.tools import (
@@ -21,6 +23,49 @@ from demo.tools import (
     lookup_stock,
     resolve_symbol,
 )
+
+
+# ── Risk-mode prompt tailoring ───────────────────────────────────────────────
+
+RISK_MODE_INSTRUCTIONS = {
+    "conservative": (
+        "You are in CONSERVATIVE mode. Prioritize capital preservation above all. "
+        "Only recommend trades with a clear risk/reward edge. Favor tight stop-losses, "
+        "smaller add-ons, and doing nothing when the setup is marginal. "
+        "If a position is underwater, prefer reducing risk over aggressive averaging down."
+    ),
+    "normal": (
+        "You are in NORMAL mode. Balance risk and return. Use sensible position sizing, "
+        "clear stop-losses, and add-on scenarios only when the technical setup justifies it."
+    ),
+    "aggressive": (
+        "You are in AGGRESSIVE mode. The user accepts larger risk and wider drawdowns "
+        "in pursuit of higher returns or faster recovery from losses. "
+        "You may recommend larger positions, momentum entries, wider stops, and averaging "
+        "down on conviction setups. Be decisive and explicit about the risk being taken."
+    ),
+}
+
+
+def _risk_personality(risk_mode: str) -> tuple[str, str]:
+    """Return (goal_suffix, personality) for a risk mode."""
+    instructions = RISK_MODE_INSTRUCTIONS.get(risk_mode, RISK_MODE_INSTRUCTIONS["normal"])
+    if risk_mode == "conservative":
+        personality = (
+            "Cautious and protective. You think in terms of 'what can go wrong first' "
+            "and only act when the odds are clearly favorable."
+        )
+    elif risk_mode == "aggressive":
+        personality = (
+            "Bold and opportunity-focused. You accept volatility and prioritize setups "
+            "with asymmetric upside, while still labeling the downside clearly."
+        )
+    else:
+        personality = (
+            "Data-driven and disciplined. You care about risk management, cost basis, "
+            "and realistic price targets. You never give vague advice."
+        )
+    return instructions, personality
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -228,77 +273,95 @@ BIDIRECTIONAL_PLAN = (
     "Never give exit advice without the corresponding add-on scenario."
 )
 
-portfolio_analyst = kg.Agent(
-    role="personal portfolio analyst",
-    goal=(
-        "Help the user make better trading decisions for stocks they own. "
-        "When asked about a position, first fetch the user's holding details, "
-        "then fetch price data, fundamentals, and technicals. "
-        "Give specific, actionable suggestions for the coming days "
-        "and the coming weeks, and explain your reasoning with numbers. "
-        "If the user mentions a new trade or holding, use record_position to save it.\n\n"
-        "IMPORTANT: when the user says they bought/hold/added shares (including "
-        "Chinese phrases like 我买了... 我持有... 买入...), call record_position first, "
-        "then acknowledge the saved position before analyzing.\n\n"
-        "RISK MANAGEMENT: suggest concrete stop-loss and take-profit levels. "
-        "If the user asks to set them (止损/止盈/stop loss/take profit), "
-        "call set_stop_loss or set_take_profit."
-    ),
-    personality=(
-        "Data-driven and disciplined. You care about risk management, cost basis, "
-        "and realistic price targets. You never give vague advice."
-    ),
-    system_prompt=None,
-    tools=[
-        get_my_position,
-        list_my_positions,
-        record_position,
-        remove_position,
-        set_stop_loss,
-        set_take_profit,
-        calculate_position_size,
-        compute_signal,
-        lookup_stock,
-        get_fundamentals,
-        get_technical_summary,
-    ],
-    llm=_get_llm(),
-    max_iterations=6,
-)
 
-market_researcher = kg.Agent(
-    role="stock researcher",
-    goal="Understand a company from price, fundamentals, and technicals. "
-         "Identify the trend regime (bull/bear/range) and the key levels "
-         "that would confirm or invalidate that regime. "
-         "Always call compute_signal for a composite technical reading and "
-         "cite its signal, confidence, and key levels.",
-    personality="Thorough and skeptical. Cite numbers.",
-    tools=[lookup_stock, get_fundamentals, get_technical_summary, compute_signal],
-    llm=_get_llm(),
-    max_iterations=4,
-)
+def make_agents(risk_mode: str = "normal") -> tuple[kg.Agent, kg.Agent, kg.Agent]:
+    """Build the three pipeline agents for a given risk mode.
 
-trading_strategist = kg.Agent(
-    role="trading strategist",
-    goal=(
-        "Turn research and portfolio context into concrete trading suggestions "
-        "for the next few days and the next few weeks.\n\n"
-        "Always call compute_signal before giving short-term advice. "
-        "Base your stop-loss and take-profit levels on the key_levels it returns "
-        "(or justify a deviation with numbers).\n\n"
-        + BIDIRECTIONAL_PLAN
-    ),
-    personality="Practical and risk-aware. Always include exit AND add-on scenarios.",
-    tools=[
-        get_technical_summary,
-        compute_signal,
-        lookup_stock,
-        calculate_position_size,
-    ],
-    llm=_get_llm(),
-    max_iterations=3,
-)
+    The returned agents have mode-specific goals and personalities so that
+    conservative/normal/aggressive requests produce appropriately different
+    advice. Tools pick up the same mode via the context-var set by the caller.
+    """
+    risk_instruction, risk_personality = _risk_personality(risk_mode)
+
+    analyst = kg.Agent(
+        role="personal portfolio analyst",
+        goal=(
+            "Help the user make better trading decisions for stocks they own. "
+            "When asked about a position, first fetch the user's holding details, "
+            "then fetch price data, fundamentals, and technicals. "
+            "Give specific, actionable suggestions for the coming days "
+            "and the coming weeks, and explain your reasoning with numbers. "
+            "If the user mentions a new trade or holding, use record_position to save it.\n\n"
+            "IMPORTANT: when the user says they bought/hold/added shares (including "
+            "Chinese phrases like 我买了... 我持有... 买入...), call record_position first, "
+            "then acknowledge the saved position before analyzing.\n\n"
+            "RISK MANAGEMENT: suggest concrete stop-loss and take-profit levels. "
+            "If the user asks to set them (止损/止盈/stop loss/take profit), "
+            "call set_stop_loss or set_take_profit.\n\n"
+            f"{risk_instruction}"
+        ),
+        personality=risk_personality,
+        system_prompt=None,
+        tools=[
+            get_my_position,
+            list_my_positions,
+            record_position,
+            remove_position,
+            set_stop_loss,
+            set_take_profit,
+            calculate_position_size,
+            compute_signal,
+            lookup_stock,
+            get_fundamentals,
+            get_technical_summary,
+        ],
+        llm=_get_llm(),
+        max_iterations=6,
+    )
+
+    researcher = kg.Agent(
+        role="stock researcher",
+        goal=(
+            "Understand a company from price, fundamentals, and technicals. "
+            "Identify the trend regime (bull/bear/range) and the key levels "
+            "that would confirm or invalidate that regime. "
+            "Always call compute_signal for a composite technical reading and "
+            "cite its signal, confidence, and key levels.\n\n"
+            f"{risk_instruction}"
+        ),
+        personality=f"{risk_personality} Cite numbers.",
+        tools=[lookup_stock, get_fundamentals, get_technical_summary, compute_signal],
+        llm=_get_llm(),
+        max_iterations=4,
+    )
+
+    strategist = kg.Agent(
+        role="trading strategist",
+        goal=(
+            "Turn research and portfolio context into concrete trading suggestions "
+            "for the next few days and the next few weeks.\n\n"
+            "Always call compute_signal before giving short-term advice. "
+            "Base your stop-loss and take-profit levels on the key_levels it returns "
+            "(or justify a deviation with numbers).\n\n"
+            f"{risk_instruction}\n\n"
+            + BIDIRECTIONAL_PLAN
+        ),
+        personality=f"{risk_personality} Always include exit AND add-on scenarios.",
+        tools=[
+            get_technical_summary,
+            compute_signal,
+            lookup_stock,
+            calculate_position_size,
+        ],
+        llm=_get_llm(),
+        max_iterations=3,
+    )
+
+    return analyst, researcher, strategist
+
+
+# Module-level normal-mode agents for backward compatibility.
+portfolio_analyst, market_researcher, trading_strategist = make_agents("normal")
 
 
 # ── Multi-agent pipeline ────────────────────────────────────────────────────
@@ -324,7 +387,7 @@ def _stage_prompt(state: dict, extra: str) -> str:
     return "\n\n".join(parts)
 
 
-async def _research_node(state: dict) -> dict:
+async def _research_node(state: dict, researcher: kg.Agent) -> dict:
     """Stage 1: market_researcher studies the company.
 
     Research reports are cached per symbol (TTL hours — see demo.cache).
@@ -351,7 +414,7 @@ async def _research_node(state: dict) -> dict:
             })
             return state
 
-    result = await market_researcher.execute({"input": _stage_prompt(state, "")})
+    result = await researcher.execute({"input": _stage_prompt(state, "")})
     state["research"] = result.get("output", "")
     state["research_cached"] = False
 
@@ -367,7 +430,7 @@ async def _research_node(state: dict) -> dict:
     return state
 
 
-async def _strategy_node(state: dict) -> dict:
+async def _strategy_node(state: dict, strategist: kg.Agent) -> dict:
     """Stage 2: trading_strategist turns research into a strategy."""
     research = state.get("research", "")
     prompt = _stage_prompt(
@@ -377,7 +440,7 @@ async def _strategy_node(state: dict) -> dict:
         f"for the next few days and the next few weeks. "
         f"Follow the mandatory EXIT / ADD-ON / DO-NOTHING structure.",
     )
-    result = await trading_strategist.execute({"input": prompt})
+    result = await strategist.execute({"input": prompt})
     state["strategy"] = result.get("output", "")
     await kg.stream_event(
         {"type": "stage", "stage": "strategy", "content": state["strategy"]}
@@ -385,7 +448,7 @@ async def _strategy_node(state: dict) -> dict:
     return state
 
 
-async def _advice_node(state: dict) -> dict:
+async def _advice_node(state: dict, analyst: kg.Agent) -> dict:
     """Stage 3: portfolio_analyst gives personalized advice."""
     strategy = state.get("strategy", "")
     prompt = _stage_prompt(
@@ -396,18 +459,65 @@ async def _advice_node(state: dict) -> dict:
         f"add-on scenario (with sizing), and the do-nothing zone. "
         f"Respond in the same language as the user's question.",
     )
-    result = await portfolio_analyst.execute({"input": prompt})
+    result = await analyst.execute({"input": prompt})
     state["output"] = result.get("output", "")
     return state
 
 
-_pipeline_graph = kg.Graph()
-_pipeline_graph.add_node("research", _research_node)
-_pipeline_graph.add_node("strategy", _strategy_node)
-_pipeline_graph.add_node("advice", _advice_node)
-_pipeline_graph.add_edge("research", "strategy")
-_pipeline_graph.add_edge("strategy", "advice")
-_pipeline_graph.set_entry_point("research")
+def build_pipeline(risk_mode: str = "normal") -> tuple[kg.Graph, kg.MemorySaver]:
+    """Compile the research → strategy → advice graph for a risk mode.
 
-pipeline_saver = kg.MemorySaver()
-pipeline = _pipeline_graph.compile(checkpointer=pipeline_saver)
+    Returns the compiled pipeline and the checkpointer so callers can load
+    final state by thread_id.
+
+    The agents' goals/personalities embed the mode, but the tool thresholds
+    (compute_signal, position sizing) read the risk-mode context var — the
+    caller must call demo.tools.set_risk_mode() in its own task so tools
+    use the matching profile (demo.backend does this per request, the paper
+    engine per tick).
+    """
+    analyst, researcher, strategist = make_agents(risk_mode)
+
+    # Async closures — plain lambdas would return coroutines, which the
+    # graph (sync-wrapper path) cannot handle.
+    async def _research_fn(state: dict) -> dict:
+        return await _research_node(state, researcher)
+
+    async def _strategy_fn(state: dict) -> dict:
+        return await _strategy_node(state, strategist)
+
+    async def _advice_fn(state: dict) -> dict:
+        return await _advice_node(state, analyst)
+
+    graph = kg.Graph()
+    graph.add_node("research", _research_fn)
+    graph.add_node("strategy", _strategy_fn)
+    graph.add_node("advice", _advice_fn)
+    graph.add_edge("research", "strategy")
+    graph.add_edge("strategy", "advice")
+    graph.set_entry_point("research")
+
+    saver = kg.MemorySaver()
+    return graph.compile(checkpointer=saver), saver
+
+
+# One pipeline per risk mode, selected per request by /chat. Building all
+# three up front keeps mode switching cheap while each keeps mode-specific
+# agent goals/personalities.
+PIPELINES: dict[str, tuple[kg.Graph, kg.MemorySaver]] = {
+    mode: build_pipeline(mode)
+    for mode in ("conservative", "normal", "aggressive")
+}
+
+
+def get_pipeline(risk_mode: str = "normal") -> tuple[kg.Graph, kg.MemorySaver]:
+    """Return the compiled pipeline (+ saver) for a risk mode.
+
+    Unknown modes fall back to normal.
+    """
+    mode = str(risk_mode).lower().strip()
+    return PIPELINES.get(mode, PIPELINES["normal"])
+
+
+# Module-level normal-mode pipeline for backward compatibility.
+pipeline, pipeline_saver = get_pipeline("normal")
